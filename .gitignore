@@ -1,10 +1,6 @@
-# Sensitive/local runtime data
-profile.json
-runtime/config.json
-runtime/sing-box.log
-runtime/client.log
+# Runtime data (configs, logs, binaries, local profile)
+runtime/
 
 # Local binaries and OS noise
-sing-box.exe
 .DS_Store
 Thumbs.db

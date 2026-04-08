@@ -245,16 +245,21 @@ function Save-Profile([hashtable]$profile) {
 }
 
 function Load-Profile {
+    $defaultSingboxPath = Join-Path $script:RuntimeDir "sing-box.exe"
     if (-not (Test-Path $script:ProfilePath)) {
-        return @{ singbox_path = (Join-Path $script:AppRoot "sing-box.exe"); vless_url = ""; primary_domains_text = (Get-DefaultVpnDomains) -join [Environment]::NewLine }
+        return @{ singbox_path = $defaultSingboxPath; vless_url = ""; primary_domains_text = (Get-DefaultVpnDomains) -join [Environment]::NewLine }
     }
     try {
         $obj = (Get-Content -Path $script:ProfilePath -Raw -Encoding UTF8) | ConvertFrom-Json
         $primaryText = [string]$obj.primary_domains_text
         if ([string]::IsNullOrWhiteSpace($primaryText)) { $primaryText = (Get-DefaultVpnDomains) -join [Environment]::NewLine }
-        return @{ singbox_path = [string]$obj.singbox_path; vless_url = [string]$obj.vless_url; primary_domains_text = $primaryText }
+        $singboxPath = [string]$obj.singbox_path
+        if ([string]::IsNullOrWhiteSpace($singboxPath)) {
+            $singboxPath = $defaultSingboxPath
+        }
+        return @{ singbox_path = $singboxPath; vless_url = [string]$obj.vless_url; primary_domains_text = $primaryText }
     } catch {
-        return @{ singbox_path = (Join-Path $script:AppRoot "sing-box.exe"); vless_url = ""; primary_domains_text = (Get-DefaultVpnDomains) -join [Environment]::NewLine }
+        return @{ singbox_path = $defaultSingboxPath; vless_url = ""; primary_domains_text = (Get-DefaultVpnDomains) -join [Environment]::NewLine }
     }
 }
 

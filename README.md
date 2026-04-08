@@ -11,9 +11,8 @@ Minimal desktop client with:
 
 ## Quick start
 
-1. Put `sing-box.exe` into this folder  
-   (or set the full path in the app field).
-2. Run `start.cmd`.
+1. Run `start.cmd`.
+2. If `runtime/sing-box.exe` is missing, it will be downloaded automatically (latest Windows x64 release).
 3. Paste your `vless://...` URL.
 4. Click `Connect`.
 5. Click `Disconnect` when done.
@@ -25,7 +24,7 @@ Minimal desktop client with:
 - Enter only primary domains (for example `youtube.com` and `chatgpt.com`).
 - On connect, the app dynamically discovers related domains (DNS CNAME + page host extraction) and routes them via VPN.
 - All traffic outside discovered domain suffixes goes direct.
-- Profile is saved to `profile.json`.
+- Profile is saved to `runtime/profile.json`.
 - Runtime config is generated at `runtime/config.json`.
 
 ## Structure
