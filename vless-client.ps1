@@ -72,7 +72,8 @@ function Release-AppResources {
 # UI
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "winvlessclient"
-$form.Size = New-Object System.Drawing.Size(900, 620)
+$form.Size = New-Object System.Drawing.Size(900, 700)
+$form.MinimumSize = New-Object System.Drawing.Size(600, 500)
 $form.StartPosition = "CenterScreen"
 
 # Tray icon
@@ -133,40 +134,55 @@ $txtDomains = New-Object System.Windows.Forms.TextBox
 $txtDomains.Multiline = $true
 $txtDomains.ScrollBars = "Vertical"
 $txtDomains.Location = New-Object System.Drawing.Point(16, 100)
-$txtDomains.Size = New-Object System.Drawing.Size(850, 90)
+$txtDomains.Size = New-Object System.Drawing.Size(850, 150)
 $txtDomains.Anchor = "Top,Left,Right"
+$txtDomains.ShortcutsEnabled = $true
+$txtDomains.Add_KeyDown({
+    if ($_.Control -and $_.KeyCode -eq [System.Windows.Forms.Keys]::A) {
+        $txtDomains.SelectAll()
+        $_.SuppressKeyPress = $true
+    }
+})
 $form.Controls.Add($txtDomains)
+
+$splitter = New-Object System.Windows.Forms.Panel
+$splitter.Location = New-Object System.Drawing.Point(16, 254)
+$splitter.Size = New-Object System.Drawing.Size(850, 6)
+$splitter.Cursor = [System.Windows.Forms.Cursors]::HSplit
+$splitter.BackColor = [System.Drawing.SystemColors]::ControlDark
+$splitter.Anchor = "Top,Left,Right"
+$form.Controls.Add($splitter)
 
 $btnConnect = New-Object System.Windows.Forms.Button
 $btnConnect.Text = "Connect"
-$btnConnect.Location = New-Object System.Drawing.Point(16, 202)
+$btnConnect.Location = New-Object System.Drawing.Point(16, 270)
 $btnConnect.Size = New-Object System.Drawing.Size(120, 36)
 $form.Controls.Add($btnConnect)
 
 $btnDisconnect = New-Object System.Windows.Forms.Button
 $btnDisconnect.Text = "Disconnect"
-$btnDisconnect.Location = New-Object System.Drawing.Point(148, 202)
+$btnDisconnect.Location = New-Object System.Drawing.Point(148, 270)
 $btnDisconnect.Size = New-Object System.Drawing.Size(120, 36)
 $btnDisconnect.Enabled = $false
 $form.Controls.Add($btnDisconnect)
 
 $lblStatus = New-Object System.Windows.Forms.Label
 $lblStatus.Text = "Status: Disconnected (Selective VPN mode)"
-$lblStatus.Location = New-Object System.Drawing.Point(290, 210)
+$lblStatus.Location = New-Object System.Drawing.Point(290, 278)
 $lblStatus.Size = New-Object System.Drawing.Size(560, 24)
 $lblStatus.Anchor = "Top,Left,Right"
 $form.Controls.Add($lblStatus)
 
 $btnCopyLog = New-Object System.Windows.Forms.Button
 $btnCopyLog.Text = "Copy"
-$btnCopyLog.Location = New-Object System.Drawing.Point(760, 252)
+$btnCopyLog.Location = New-Object System.Drawing.Point(760, 316)
 $btnCopyLog.Size = New-Object System.Drawing.Size(50, 26)
 $btnCopyLog.Anchor = "Top,Right"
 $form.Controls.Add($btnCopyLog)
 
 $btnClearLog = New-Object System.Windows.Forms.Button
 $btnClearLog.Text = "Clear"
-$btnClearLog.Location = New-Object System.Drawing.Point(816, 252)
+$btnClearLog.Location = New-Object System.Drawing.Point(816, 316)
 $btnClearLog.Size = New-Object System.Drawing.Size(50, 26)
 $btnClearLog.Anchor = "Top,Right"
 $form.Controls.Add($btnClearLog)
@@ -175,10 +191,56 @@ $txtLogs = New-Object System.Windows.Forms.TextBox
 $txtLogs.Multiline = $true
 $txtLogs.ScrollBars = "Vertical"
 $txtLogs.ReadOnly = $true
-$txtLogs.Location = New-Object System.Drawing.Point(16, 284)
-$txtLogs.Size = New-Object System.Drawing.Size(850, 286)
+$txtLogs.ShortcutsEnabled = $true
+$txtLogs.Add_KeyDown({
+    if ($_.Control -and $_.KeyCode -eq [System.Windows.Forms.Keys]::A) {
+        $txtLogs.SelectAll()
+        $_.SuppressKeyPress = $true
+    }
+})
+$txtLogs.Location = New-Object System.Drawing.Point(16, 346)
+$txtLogs.Size = New-Object System.Drawing.Size(850, 304)
 $txtLogs.Anchor = "Top,Bottom,Left,Right"
 $form.Controls.Add($txtLogs)
+
+# Draggable splitter between domains and logs
+$script:SplitDragging = $false
+$script:SplitStartY = 0
+$script:SplitStartTop = 0
+
+$splitter.Add_MouseDown({
+    $script:SplitDragging = $true
+    $script:SplitStartY = [System.Windows.Forms.Cursor]::Position.Y
+    $script:SplitStartTop = $splitter.Top
+    $splitter.Capture = $true
+})
+
+$splitter.Add_MouseMove({
+    if (-not $script:SplitDragging) { return }
+    $delta = [System.Windows.Forms.Cursor]::Position.Y - $script:SplitStartY
+    $newTop = $script:SplitStartTop + $delta
+    $minTop = $txtDomains.Top + 60
+    $maxTop = $txtLogs.Bottom - 80
+    $newTop = [Math]::Max($minTop, [Math]::Min($maxTop, $newTop))
+    $shift = $newTop - $splitter.Top
+    if ($shift -eq 0) { return }
+    $form.SuspendLayout()
+    $txtDomains.Height += $shift
+    $splitter.Top += $shift
+    $btnConnect.Top += $shift
+    $btnDisconnect.Top += $shift
+    $lblStatus.Top += $shift
+    $btnCopyLog.Top += $shift
+    $btnClearLog.Top += $shift
+    $txtLogs.Top += $shift
+    $txtLogs.Height -= $shift
+    $form.ResumeLayout($true)
+})
+
+$splitter.Add_MouseUp({
+    $script:SplitDragging = $false
+    $splitter.Capture = $false
+})
 
 function Append-Log([string]$message) {
     try {
