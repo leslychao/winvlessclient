@@ -224,7 +224,7 @@ function Build-SingBoxConfigFromVless([string]$vlessUrl, [string[]]$vpnDomains) 
             reverse_mapping = $true
         }
         inbounds = @(
-            @{ type = "tun"; tag = "tun-in"; interface_name = "sb-vpn"; address = @("172.19.0.1/30"); mtu = 9000; auto_route = $true; strict_route = $true; stack = "mixed" }
+            @{ type = "tun"; tag = "tun-in"; interface_name = "sb-vpn"; address = @("172.19.0.1/30"); mtu = 1500; auto_route = $true; strict_route = $false; stack = "mixed" }
         )
         outbounds = @(
             $outbound,
