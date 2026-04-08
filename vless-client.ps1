@@ -32,6 +32,12 @@ function Release-AppResources {
         Stop-SingBox
     } catch {}
     try {
+        if ($script:TrayIcon) {
+            $script:TrayIcon.Visible = $false
+            $script:TrayIcon.Dispose()
+        }
+    } catch {}
+    try {
         if ($script:JobHandle -ne [IntPtr]::Zero) {
             [JobObjectApi]::CloseHandle($script:JobHandle) | Out-Null
             $script:JobHandle = [IntPtr]::Zero
@@ -68,6 +74,42 @@ $form = New-Object System.Windows.Forms.Form
 $form.Text = "winvlessclient"
 $form.Size = New-Object System.Drawing.Size(900, 620)
 $form.StartPosition = "CenterScreen"
+
+# Tray icon
+$script:TrayExiting = $false
+$script:TrayIcon = New-Object System.Windows.Forms.NotifyIcon
+try {
+    $exePath = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    $script:TrayIcon.Icon = [System.Drawing.Icon]::ExtractAssociatedIcon($exePath)
+} catch {
+    $script:TrayIcon.Icon = [System.Drawing.SystemIcons]::Application
+}
+$script:TrayIcon.Text = "VLESS Client"
+$script:TrayIcon.Visible = $false
+
+function Restore-FromTray {
+    $script:TrayIcon.Visible = $false
+    $form.Show()
+    $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+    $form.Activate()
+}
+
+$trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
+[void]$trayMenu.Items.Add("Show", $null, { Restore-FromTray })
+[void]$trayMenu.Items.Add("-")
+[void]$trayMenu.Items.Add("Exit", $null, {
+    $script:TrayExiting = $true
+    $form.Close()
+})
+$script:TrayIcon.ContextMenuStrip = $trayMenu
+$script:TrayIcon.Add_DoubleClick({ Restore-FromTray })
+
+$form.Add_Resize({
+    if ($form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) {
+        $form.Hide()
+        $script:TrayIcon.Visible = $true
+    }
+})
 
 $labelVless = New-Object System.Windows.Forms.Label
 $labelVless.Text = "VLESS URL:"
@@ -200,18 +242,19 @@ $form.Add_Shown({
 
 $btnConnect.Add_Click({
     try {
-        if ($script:ProcessRef -and -not $script:ProcessRef.HasExited) {
-            Append-Log "Already connected."
-            return
-        }
-
         $singboxPath = [string]$profile.singbox_path
         if (-not (Test-Path $singboxPath)) { throw "sing-box.exe not found: $singboxPath" }
         if (-not (Test-IsAdmin)) { throw "Selective VPN mode (TUN) requires Administrator rights. Restart start.cmd as Administrator." }
 
+        if ($script:ProcessRef -and -not $script:ProcessRef.HasExited) {
+            if ($script:HealthTimer) { $script:HealthTimer.Stop() }
+            Stop-SingBox
+            Append-Log "Stopped previous connection."
+        }
+
         $killedBeforeConnect = Stop-OrphanSingBox $singboxPath
         if ($killedBeforeConnect -gt 0) {
-            Append-Log ("Stopped old sing-box before connect: " + $killedBeforeConnect)
+            Append-Log ("Stopped orphan sing-box processes: " + $killedBeforeConnect)
         }
 
         $vlessUrl = $txtVless.Text.Trim()
@@ -248,7 +291,6 @@ $btnConnect.Add_Click({
         $script:ProcessRef = $proc
 
         $script:HealthTimer.Start()
-        $btnConnect.Enabled = $false
         $btnDisconnect.Enabled = $true
         $lblStatus.Text = "Status: Connected (Selective VPN mode)"
         Append-Log ("Connected. PID=" + $proc.Id + ", TUN=sb-vpn, domains=" + $vpnDomains.Count)
@@ -273,7 +315,22 @@ $btnDisconnect.Add_Click({
 })
 
 $form.Add_FormClosing({
+    $evtArgs = $_
+    if (-not $script:TrayExiting) {
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            "Are you sure you want to exit?`nVPN connection will be stopped.",
+            "Exit VLESS Client",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Question
+        )
+        if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) {
+            $evtArgs.Cancel = $true
+            return
+        }
+    }
+    $script:TrayIcon.Visible = $false
+    $script:TrayIcon.Dispose()
     Release-AppResources
 })
 
-[void]$form.ShowDialog()
+[System.Windows.Forms.Application]::Run($form)
