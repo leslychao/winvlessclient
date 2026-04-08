@@ -21,10 +21,13 @@ Minimal desktop client with:
 
 - Run as **Administrator** (`tun` requires elevated rights).
 - This app uses `sing-box` TUN mode, not browser/system proxy mode.
-- Enter only primary domains (for example `youtube.com` and `chatgpt.com`).
-- On connect, the app dynamically discovers related domains (DNS CNAME + page host extraction) and routes them via VPN.
-- All traffic outside discovered domain suffixes goes direct.
-- Profile is saved to `runtime/profile.json`.
+- `sing-box` path is fixed to `runtime/sing-box.exe` and is not editable in UI.
+- Split tunneling is done by `sing-box` route rules on the client (`tun` + domain rules).
+- Built-in proxy domain coverage includes: `youtube.com`, `youtu.be`, `googlevideo.com`, `ytimg.com`, `openai.com`, `chatgpt.com`, `oaistatic.com`.
+- Traffic for domains outside the configured domain rules goes `direct`.
+- Sensitive connection data is saved to `runtime/connection.private.json` (ignored by git).
+- Domain list and routing preferences are saved to `settings.json` (project root).
+- Legacy `runtime/profile.json` is migrated automatically and removed.
 - Runtime config is generated at `runtime/config.json`.
 
 ## Structure

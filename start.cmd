@@ -35,8 +35,8 @@ if not exist ".\runtime\sing-box.exe" (
 
 net session >nul 2>&1
 if %errorlevel% neq 0 (
-  powershell -NoProfile -Command "Start-Process -WindowStyle Hidden -FilePath 'powershell' -Verb RunAs -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File ""%~dp0vless-client.ps1""'"
+  powershell -NoProfile -Command "Start-Process -FilePath 'powershell' -Verb RunAs -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File ""%~dp0vless-client.ps1""'"
   exit /b
 )
-powershell -NoProfile -Command "Start-Process -WindowStyle Hidden -FilePath 'powershell' -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File ""%~dp0vless-client.ps1""'"
+powershell -NoProfile -Command "Start-Process -FilePath 'powershell' -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File ""%~dp0vless-client.ps1""'"
 exit /b

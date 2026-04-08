@@ -1,5 +1,9 @@
-# Runtime data (configs, logs, binaries, local profile)
-runtime/
+# Runtime data
+runtime/*
+runtime/connection.private.json
+runtime/config.json
+runtime/*.log
+runtime/sing-box.exe
 
 # Local binaries and OS noise
 .DS_Store

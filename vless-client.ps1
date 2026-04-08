@@ -2,10 +2,27 @@ $ErrorActionPreference = "Stop"
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class ConsoleWindow {
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetConsoleWindow();
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+}
+"@
 
 . "$PSScriptRoot\lib\bootstrap.ps1"
 . "$PSScriptRoot\lib\core.ps1"
 . "$PSScriptRoot\lib\process.ps1"
+
+try {
+    $h = [ConsoleWindow]::GetConsoleWindow()
+    if ($h -ne [IntPtr]::Zero) {
+        [ConsoleWindow]::ShowWindow($h, 0) | Out-Null
+    }
+} catch {}
 
 function Release-AppResources {
     try {
@@ -64,48 +81,36 @@ $txtVless.Size = New-Object System.Drawing.Size(850, 28)
 $txtVless.Anchor = "Top,Left,Right"
 $form.Controls.Add($txtVless)
 
-$labelPath = New-Object System.Windows.Forms.Label
-$labelPath.Text = "Path to sing-box.exe:"
-$labelPath.Location = New-Object System.Drawing.Point(16, 76)
-$labelPath.Size = New-Object System.Drawing.Size(200, 20)
-$form.Controls.Add($labelPath)
-
-$txtPath = New-Object System.Windows.Forms.TextBox
-$txtPath.Location = New-Object System.Drawing.Point(16, 100)
-$txtPath.Size = New-Object System.Drawing.Size(850, 28)
-$txtPath.Anchor = "Top,Left,Right"
-$form.Controls.Add($txtPath)
-
 $labelDomains = New-Object System.Windows.Forms.Label
 $labelDomains.Text = "Primary domains via VPN (one per line):"
-$labelDomains.Location = New-Object System.Drawing.Point(16, 136)
+$labelDomains.Location = New-Object System.Drawing.Point(16, 76)
 $labelDomains.Size = New-Object System.Drawing.Size(300, 20)
 $form.Controls.Add($labelDomains)
 
 $txtDomains = New-Object System.Windows.Forms.TextBox
 $txtDomains.Multiline = $true
 $txtDomains.ScrollBars = "Vertical"
-$txtDomains.Location = New-Object System.Drawing.Point(16, 160)
+$txtDomains.Location = New-Object System.Drawing.Point(16, 100)
 $txtDomains.Size = New-Object System.Drawing.Size(850, 90)
 $txtDomains.Anchor = "Top,Left,Right"
 $form.Controls.Add($txtDomains)
 
 $btnConnect = New-Object System.Windows.Forms.Button
 $btnConnect.Text = "Connect"
-$btnConnect.Location = New-Object System.Drawing.Point(16, 262)
+$btnConnect.Location = New-Object System.Drawing.Point(16, 202)
 $btnConnect.Size = New-Object System.Drawing.Size(120, 36)
 $form.Controls.Add($btnConnect)
 
 $btnDisconnect = New-Object System.Windows.Forms.Button
 $btnDisconnect.Text = "Disconnect"
-$btnDisconnect.Location = New-Object System.Drawing.Point(148, 262)
+$btnDisconnect.Location = New-Object System.Drawing.Point(148, 202)
 $btnDisconnect.Size = New-Object System.Drawing.Size(120, 36)
 $btnDisconnect.Enabled = $false
 $form.Controls.Add($btnDisconnect)
 
 $lblStatus = New-Object System.Windows.Forms.Label
 $lblStatus.Text = "Status: Disconnected (Selective VPN mode)"
-$lblStatus.Location = New-Object System.Drawing.Point(290, 270)
+$lblStatus.Location = New-Object System.Drawing.Point(290, 210)
 $lblStatus.Size = New-Object System.Drawing.Size(560, 24)
 $lblStatus.Anchor = "Top,Left,Right"
 $form.Controls.Add($lblStatus)
@@ -114,8 +119,8 @@ $txtLogs = New-Object System.Windows.Forms.TextBox
 $txtLogs.Multiline = $true
 $txtLogs.ScrollBars = "Vertical"
 $txtLogs.ReadOnly = $true
-$txtLogs.Location = New-Object System.Drawing.Point(16, 312)
-$txtLogs.Size = New-Object System.Drawing.Size(850, 258)
+$txtLogs.Location = New-Object System.Drawing.Point(16, 252)
+$txtLogs.Size = New-Object System.Drawing.Size(850, 318)
 $txtLogs.Anchor = "Top,Bottom,Left,Right"
 $form.Controls.Add($txtLogs)
 
@@ -150,7 +155,6 @@ $script:HealthTimer.Add_Tick({
 })
 
 $profile = Load-Profile
-$txtPath.Text = $profile.singbox_path
 $txtVless.Text = $profile.vless_url
 if ([string]::IsNullOrWhiteSpace([string]$profile.primary_domains_text)) {
     $txtDomains.Text = (Get-DefaultVpnDomains) -join [Environment]::NewLine
@@ -161,8 +165,7 @@ Ensure-JobObject
 
 $form.Add_Shown({
     try {
-        $startupPath = $txtPath.Text.Trim()
-        $killed = Stop-OrphanSingBox $startupPath
+        $killed = Stop-OrphanSingBox $profile.singbox_path
         if ($killed -gt 0) {
             Append-Log ("Stopped old sing-box processes: " + $killed)
         }
@@ -178,8 +181,7 @@ $btnConnect.Add_Click({
             return
         }
 
-        $singboxPath = $txtPath.Text.Trim()
-        if ([string]::IsNullOrWhiteSpace($singboxPath)) { throw "Specify path to sing-box.exe" }
+        $singboxPath = [string]$profile.singbox_path
         if (-not (Test-Path $singboxPath)) { throw "sing-box.exe not found: $singboxPath" }
         if (-not (Test-IsAdmin)) { throw "Selective VPN mode (TUN) requires Administrator rights. Restart start.cmd as Administrator." }
 
@@ -191,12 +193,8 @@ $btnConnect.Add_Click({
         $vlessUrl = $txtVless.Text.Trim()
         if ([string]::IsNullOrWhiteSpace($vlessUrl)) { throw "VLESS URL is empty" }
 
-        $userDomains = Get-NormalizedDomainList $txtDomains.Text
-        $vpnDomains = Expand-VpnDomainGroups $userDomains
+        $vpnDomains = Merge-RequiredVpnDomains (Get-NormalizedDomainList $txtDomains.Text)
         if (-not $vpnDomains -or $vpnDomains.Count -eq 0) { throw "Primary domain list is empty. Add at least one domain." }
-        if ($vpnDomains.Count -gt $userDomains.Count) {
-            Append-Log ("Auto-expanded domains: " + $userDomains.Count + " -> " + $vpnDomains.Count)
-        }
 
         $config = Build-SingBoxConfigFromVless $vlessUrl $vpnDomains
         Write-TextNoBom -path $script:ConfigPath -content ($config | ConvertTo-Json -Depth 20)
@@ -206,9 +204,8 @@ $btnConnect.Add_Click({
         $script:LastSingBoxLogOffset = 0
 
         Save-Profile @{
-            singbox_path = $singboxPath
             vless_url = $vlessUrl
-            primary_domains_text = ($userDomains -join [Environment]::NewLine)
+            primary_domains_text = ($vpnDomains -join [Environment]::NewLine)
         }
 
         $psi = New-Object System.Diagnostics.ProcessStartInfo

@@ -38,7 +38,15 @@ function Write-TextNoBom([string]$path, [string]$content) {
 }
 
 function Get-DefaultVpnDomains {
-    return @("youtube.com", "chatgpt.com")
+    return @(
+        "youtube.com",
+        "youtu.be",
+        "googlevideo.com",
+        "ytimg.com",
+        "openai.com",
+        "chatgpt.com",
+        "oaistatic.com"
+    )
 }
 
 function Get-NormalizedDomainList([string]$rawText) {
@@ -59,76 +67,15 @@ function Get-NormalizedDomainList([string]$rawText) {
     return $result.ToArray()
 }
 
-function Get-EffectiveDomainSuffix([string]$host) {
-    if ([string]::IsNullOrWhiteSpace($host)) { return "" }
-    $labels = $host.Split(".") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-    if ($labels.Count -lt 2) { return $host }
-    if ($labels.Count -ge 3 -and $labels[$labels.Count - 1].Length -eq 2 -and $labels[$labels.Count - 2].Length -le 3) {
-        return (($labels[($labels.Count - 3)..($labels.Count - 1)]) -join ".")
-    }
-    return (($labels[($labels.Count - 2)..($labels.Count - 1)]) -join ".")
-}
-
-function Expand-VpnDomainGroups([string[]]$domains) {
+function Merge-RequiredVpnDomains([string[]]$domains) {
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     $result = New-Object System.Collections.Generic.List[string]
-    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($d in $domains) {
-        if (-not [string]::IsNullOrWhiteSpace($d) -and $seen.Add($d)) { $result.Add($d) }
+        if ([string]::IsNullOrWhiteSpace($d)) { continue }
+        if ($set.Add($d)) { $result.Add($d) }
     }
-
-    $candidates = New-Object System.Collections.Generic.Queue[string]
-    foreach ($d in $domains) {
-        $candidates.Enqueue($d)
-        $candidates.Enqueue("www.$d")
-    }
-
-    $iterations = 0
-    while ($candidates.Count -gt 0 -and $iterations -lt 40 -and $result.Count -lt 120) {
-        $iterations++
-        $current = $candidates.Dequeue()
-        if ([string]::IsNullOrWhiteSpace($current)) { continue }
-
-        try {
-            $records = Resolve-DnsName -Name $current -Type CNAME -ErrorAction SilentlyContinue
-            foreach ($rec in $records) {
-                if (-not $rec.NameHost) { continue }
-                $host = ([string]$rec.NameHost).Trim().TrimEnd(".").ToLowerInvariant()
-                if ($seen.Add($host)) { $result.Add($host) }
-                $suffix = Get-EffectiveDomainSuffix $host
-                if (-not [string]::IsNullOrWhiteSpace($suffix) -and $seen.Add($suffix)) {
-                    $result.Add($suffix)
-                    $candidates.Enqueue($suffix)
-                    $candidates.Enqueue("www.$suffix")
-                }
-            }
-        } catch {}
-
-        try {
-            $resp = Invoke-WebRequest -Uri ("https://{0}" -f $current) -Method Get -UseBasicParsing -TimeoutSec 5 -ErrorAction SilentlyContinue
-            if ($resp -and $resp.Content) {
-                $matches = [regex]::Matches($resp.Content, 'https?://([a-z0-9.-]+\.[a-z]{2,})')
-                $bare = [regex]::Matches($resp.Content, '(?<![a-z0-9-])([a-z0-9-]+(?:\.[a-z0-9-]+)+\.[a-z]{2,24})(?![a-z0-9-])')
-                $allMatches = New-Object System.Collections.Generic.List[System.Text.RegularExpressions.Match]
-                foreach ($m in $matches) { $allMatches.Add($m) }
-                foreach ($m in $bare) { $allMatches.Add($m) }
-                $added = 0
-                foreach ($m in $allMatches) {
-                    if ($m.Groups.Count -lt 2) { continue }
-                    $host = $m.Groups[1].Value.Trim().ToLowerInvariant()
-                    if ([string]::IsNullOrWhiteSpace($host)) { continue }
-                    if ($seen.Add($host)) {
-                        $result.Add($host)
-                        $added++
-                    }
-                    $suffix = Get-EffectiveDomainSuffix $host
-                    if (-not [string]::IsNullOrWhiteSpace($suffix) -and $seen.Add($suffix)) {
-                        $result.Add($suffix)
-                        $candidates.Enqueue($suffix)
-                    }
-                    if ($added -ge 30) { break }
-                }
-            }
-        } catch {}
+    foreach ($required in (Get-DefaultVpnDomains)) {
+        if ($set.Add($required)) { $result.Add($required) }
     }
     return $result.ToArray()
 }
@@ -287,26 +234,88 @@ function Build-SingBoxConfigFromVless([string]$vlessUrl, [string[]]$vpnDomains) 
     }
 }
 
+function Get-DefaultClientProfile {
+    $defaultSingboxPath = Join-Path $script:RuntimeDir "sing-box.exe"
+    return @{
+        singbox_path = $defaultSingboxPath
+        vless_url = ""
+        primary_domains_text = (Get-DefaultVpnDomains) -join [Environment]::NewLine
+    }
+}
+
+function Save-ConnectionProfile([string]$vlessUrl) {
+    Write-TextNoBom -path $script:ConnectionProfilePath -content (@{
+            vless_url = $vlessUrl
+        } | ConvertTo-Json -Depth 4)
+}
+
+function Save-SettingsProfile([string]$primaryDomainsText) {
+    $vpnDomains = Merge-RequiredVpnDomains (Get-NormalizedDomainList $primaryDomainsText)
+    Write-TextNoBom -path $script:SettingsPath -content (@{
+            vpn_domains = $vpnDomains
+        } | ConvertTo-Json -Depth 4)
+}
+
 function Save-Profile([hashtable]$profile) {
-    Write-TextNoBom -path $script:ProfilePath -content ($profile | ConvertTo-Json -Depth 6)
+    Save-ConnectionProfile ([string]$profile.vless_url)
+    Save-SettingsProfile ([string]$profile.primary_domains_text)
+}
+
+function Try-MigrateLegacyProfile {
+    $legacyPath = Join-Path $script:RuntimeDir "profile.json"
+    if (-not (Test-Path $legacyPath)) { return }
+    try {
+        $legacy = (Get-Content -Path $legacyPath -Raw -Encoding UTF8) | ConvertFrom-Json
+    } catch {
+        return
+    }
+
+    $needConnectionMigration = -not (Test-Path $script:ConnectionProfilePath)
+    $needSettingsMigration = -not (Test-Path $script:SettingsPath)
+    if ($needConnectionMigration) {
+        Save-ConnectionProfile ([string]$legacy.vless_url)
+    }
+    if ($needSettingsMigration) {
+        Save-SettingsProfile ([string]$legacy.primary_domains_text)
+    }
+
+    try {
+        Remove-Item -Path $legacyPath -Force -ErrorAction SilentlyContinue
+    } catch {}
 }
 
 function Load-Profile {
-    $defaultSingboxPath = Join-Path $script:RuntimeDir "sing-box.exe"
-    if (-not (Test-Path $script:ProfilePath)) {
-        return @{ singbox_path = $defaultSingboxPath; vless_url = ""; primary_domains_text = (Get-DefaultVpnDomains) -join [Environment]::NewLine }
+    $default = Get-DefaultClientProfile
+    Try-MigrateLegacyProfile
+
+    $vlessUrl = ""
+    if (Test-Path $script:ConnectionProfilePath) {
+        try {
+            $connection = (Get-Content -Path $script:ConnectionProfilePath -Raw -Encoding UTF8) | ConvertFrom-Json
+            $vlessUrl = [string]$connection.vless_url
+        } catch {}
     }
-    try {
-        $obj = (Get-Content -Path $script:ProfilePath -Raw -Encoding UTF8) | ConvertFrom-Json
-        $primaryText = [string]$obj.primary_domains_text
-        if ([string]::IsNullOrWhiteSpace($primaryText)) { $primaryText = (Get-DefaultVpnDomains) -join [Environment]::NewLine }
-        $singboxPath = [string]$obj.singbox_path
-        if ([string]::IsNullOrWhiteSpace($singboxPath)) {
-            $singboxPath = $defaultSingboxPath
-        }
-        return @{ singbox_path = $singboxPath; vless_url = [string]$obj.vless_url; primary_domains_text = $primaryText }
-    } catch {
-        return @{ singbox_path = $defaultSingboxPath; vless_url = ""; primary_domains_text = (Get-DefaultVpnDomains) -join [Environment]::NewLine }
+
+    $primaryText = $default.primary_domains_text
+    if (Test-Path $script:SettingsPath) {
+        try {
+            $settings = (Get-Content -Path $script:SettingsPath -Raw -Encoding UTF8) | ConvertFrom-Json
+            if ($settings.vpn_domains) {
+                $candidateDomains = @($settings.vpn_domains) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() }
+                if ($candidateDomains.Count -gt 0) {
+                    $primaryText = ($candidateDomains -join [Environment]::NewLine)
+                }
+            } else {
+                $candidateDomains = [string]$settings.primary_domains_text
+                if (-not [string]::IsNullOrWhiteSpace($candidateDomains)) { $primaryText = $candidateDomains }
+            }
+        } catch {}
+    }
+
+    return @{
+        singbox_path = $default.singbox_path
+        vless_url = $vlessUrl
+        primary_domains_text = $primaryText
     }
 }
 

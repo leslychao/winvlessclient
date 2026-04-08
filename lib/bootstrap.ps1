@@ -1,6 +1,7 @@
 $script:AppRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $script:RuntimeDir = Join-Path $script:AppRoot "runtime"
-$script:ProfilePath = Join-Path $script:RuntimeDir "profile.json"
+$script:ConnectionProfilePath = Join-Path $script:RuntimeDir "connection.private.json"
+$script:SettingsPath = Join-Path $script:AppRoot "settings.json"
 $script:ConfigPath = Join-Path $script:RuntimeDir "config.json"
 $script:ClientLogPath = Join-Path $script:RuntimeDir "client.log"
 $script:SingBoxLogPath = Join-Path $script:RuntimeDir "sing-box.log"
