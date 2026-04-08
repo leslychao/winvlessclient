@@ -7,6 +7,21 @@ Add-Type -AssemblyName System.Drawing
 . "$PSScriptRoot\lib\core.ps1"
 . "$PSScriptRoot\lib\process.ps1"
 
+function Release-AppResources {
+    try {
+        if ($script:HealthTimer) { $script:HealthTimer.Stop() }
+    } catch {}
+    try {
+        Stop-SingBox
+    } catch {}
+    try {
+        if ($script:JobHandle -ne [IntPtr]::Zero) {
+            [JobObjectApi]::CloseHandle($script:JobHandle) | Out-Null
+            $script:JobHandle = [IntPtr]::Zero
+        }
+    } catch {}
+}
+
 # Keep app alive on UI/runtime exceptions.
 [System.Windows.Forms.Application]::SetUnhandledExceptionMode([System.Windows.Forms.UnhandledExceptionMode]::CatchException)
 [System.Windows.Forms.Application]::add_ThreadException(
@@ -26,8 +41,10 @@ Add-Type -AssemblyName System.Drawing
         } else {
             Append-FileLog "Unhandled domain exception: unknown object"
         }
+        Release-AppResources
     }
 )
+[System.AppDomain]::CurrentDomain.add_ProcessExit([System.EventHandler]{ param($sender, $eventArgs) Release-AppResources })
 
 # UI
 $form = New-Object System.Windows.Forms.Form
@@ -186,7 +203,7 @@ $btnConnect.Add_Click({
         if (Test-Path $script:SingBoxLogPath) {
             Remove-Item -Path $script:SingBoxLogPath -Force -ErrorAction SilentlyContinue
         }
-        $script:LastSingBoxLogLineCount = 0
+        $script:LastSingBoxLogOffset = 0
 
         Save-Profile @{
             singbox_path = $singboxPath
@@ -235,12 +252,7 @@ $btnDisconnect.Add_Click({
 })
 
 $form.Add_FormClosing({
-    if ($script:HealthTimer) { $script:HealthTimer.Stop() }
-    Stop-SingBox
-    if ($script:JobHandle -ne [IntPtr]::Zero) {
-        [JobObjectApi]::CloseHandle($script:JobHandle) | Out-Null
-        $script:JobHandle = [IntPtr]::Zero
-    }
+    Release-AppResources
 })
 
 [void]$form.ShowDialog()

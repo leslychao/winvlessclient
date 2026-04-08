@@ -1,8 +1,35 @@
 function Append-FileLog([string]$message) {
     try {
+        Rotate-LogFile -path $script:ClientLogPath -maxBytes $script:ClientLogMaxBytes -backupCount $script:LogBackupCount | Out-Null
         $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $message
         Add-Content -Path $script:ClientLogPath -Value $line -Encoding UTF8
     } catch {}
+}
+
+function Rotate-LogFile([string]$path, [long]$maxBytes, [int]$backupCount) {
+    try {
+        if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path $path)) { return $false }
+        $item = Get-Item -Path $path -ErrorAction SilentlyContinue
+        if (-not $item -or $item.Length -le $maxBytes) { return $false }
+
+        for ($i = $backupCount; $i -ge 1; $i--) {
+            $src = "{0}.{1}" -f $path, $i
+            $dst = "{0}.{1}" -f $path, ($i + 1)
+            if (Test-Path $src) {
+                if ($i -eq $backupCount) {
+                    Remove-Item -Path $src -Force -ErrorAction SilentlyContinue
+                } else {
+                    Move-Item -Path $src -Destination $dst -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+
+        Move-Item -Path $path -Destination ("{0}.1" -f $path) -Force -ErrorAction Stop
+        New-Item -Path $path -ItemType File -Force | Out-Null
+        return $true
+    } catch {
+        return $false
+    }
 }
 
 function Write-TextNoBom([string]$path, [string]$content) {
@@ -109,21 +136,41 @@ function Expand-VpnDomainGroups([string[]]$domains) {
 function Read-SingBoxLogDelta {
     try {
         if (-not (Test-Path $script:SingBoxLogPath)) {
-            $script:LastSingBoxLogLineCount = 0
+            $script:LastSingBoxLogOffset = 0
             return
         }
-        $lines = Get-Content -Path $script:SingBoxLogPath -ErrorAction SilentlyContinue
-        if ($null -eq $lines) { return }
-        if ($lines -is [string]) { $lines = @($lines) }
-        $total = $lines.Count
-        if ($total -lt $script:LastSingBoxLogLineCount) { $script:LastSingBoxLogLineCount = 0 }
-        if ($total -gt $script:LastSingBoxLogLineCount) {
-            for ($i = $script:LastSingBoxLogLineCount; $i -lt $total; $i++) {
-                $raw = [string]$lines[$i]
-                $clean = $raw -replace '\x1b\[[0-9;]*m', ''
+        $rotated = Rotate-LogFile -path $script:SingBoxLogPath -maxBytes $script:SingBoxLogMaxBytes -backupCount $script:LogBackupCount
+        if ($rotated) {
+            $script:LastSingBoxLogOffset = 0
+            return
+        }
+
+        $len = (Get-Item -Path $script:SingBoxLogPath -ErrorAction SilentlyContinue).Length
+        if ($null -eq $len) { return }
+        if ($len -lt $script:LastSingBoxLogOffset) { $script:LastSingBoxLogOffset = 0 }
+        if ($len -eq $script:LastSingBoxLogOffset) { return }
+
+        $fs = [System.IO.File]::Open($script:SingBoxLogPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            [void]$fs.Seek($script:LastSingBoxLogOffset, [System.IO.SeekOrigin]::Begin)
+            $reader = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8, $true, 1024, $true)
+            try {
+                $chunk = $reader.ReadToEnd()
+            } finally {
+                $reader.Dispose()
+            }
+            $script:LastSingBoxLogOffset = $fs.Position
+        } finally {
+            $fs.Dispose()
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($chunk)) {
+            $lines = $chunk -split "(`r`n|`n|`r)"
+            foreach ($raw in $lines) {
+                if ([string]::IsNullOrWhiteSpace($raw)) { continue }
+                $clean = ([string]$raw) -replace '\x1b\[[0-9;]*m', ''
                 Append-Log ("sing-box: " + $clean)
             }
-            $script:LastSingBoxLogLineCount = $total
         }
     } catch {
         Append-FileLog ("Read sing-box log error: " + $_.Exception.Message)

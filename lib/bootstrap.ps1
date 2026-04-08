@@ -12,7 +12,10 @@ if (-not (Test-Path $script:RuntimeDir)) {
 $script:ProcessRef = $null
 $script:HealthTimer = $null
 $script:JobHandle = [IntPtr]::Zero
-$script:LastSingBoxLogLineCount = 0
+$script:LastSingBoxLogOffset = 0
+$script:ClientLogMaxBytes = 1MB
+$script:SingBoxLogMaxBytes = 5MB
+$script:LogBackupCount = 3
 
 Add-Type @"
 using System;
