@@ -115,12 +115,26 @@ $lblStatus.Size = New-Object System.Drawing.Size(560, 24)
 $lblStatus.Anchor = "Top,Left,Right"
 $form.Controls.Add($lblStatus)
 
+$btnCopyLog = New-Object System.Windows.Forms.Button
+$btnCopyLog.Text = "Copy"
+$btnCopyLog.Location = New-Object System.Drawing.Point(760, 252)
+$btnCopyLog.Size = New-Object System.Drawing.Size(50, 26)
+$btnCopyLog.Anchor = "Top,Right"
+$form.Controls.Add($btnCopyLog)
+
+$btnClearLog = New-Object System.Windows.Forms.Button
+$btnClearLog.Text = "Clear"
+$btnClearLog.Location = New-Object System.Drawing.Point(816, 252)
+$btnClearLog.Size = New-Object System.Drawing.Size(50, 26)
+$btnClearLog.Anchor = "Top,Right"
+$form.Controls.Add($btnClearLog)
+
 $txtLogs = New-Object System.Windows.Forms.TextBox
 $txtLogs.Multiline = $true
 $txtLogs.ScrollBars = "Vertical"
 $txtLogs.ReadOnly = $true
-$txtLogs.Location = New-Object System.Drawing.Point(16, 252)
-$txtLogs.Size = New-Object System.Drawing.Size(850, 318)
+$txtLogs.Location = New-Object System.Drawing.Point(16, 284)
+$txtLogs.Size = New-Object System.Drawing.Size(850, 286)
 $txtLogs.Anchor = "Top,Bottom,Left,Right"
 $form.Controls.Add($txtLogs)
 
@@ -134,6 +148,16 @@ function Append-Log([string]$message) {
     } catch {}
     Append-FileLog $message
 }
+
+$btnCopyLog.Add_Click({
+    if ($txtLogs.TextLength -gt 0) {
+        [System.Windows.Forms.Clipboard]::SetText($txtLogs.Text)
+    }
+})
+
+$btnClearLog.Add_Click({
+    $txtLogs.Clear()
+})
 
 $script:HealthTimer = New-Object System.Windows.Forms.Timer
 $script:HealthTimer.Interval = 1000

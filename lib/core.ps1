@@ -52,7 +52,7 @@ function Get-DefaultVpnDomains {
 function Get-NormalizedDomainList([string]$rawText) {
     $result = New-Object System.Collections.Generic.List[string]
     if ([string]::IsNullOrWhiteSpace($rawText)) { return @() }
-    $lines = $rawText -split "(`r`n|`n|`r)"
+    $lines = $rawText -split "\r?\n|\r"
     foreach ($line in $lines) {
         $item = $line.Trim().ToLowerInvariant()
         if ([string]::IsNullOrWhiteSpace($item)) { continue }
@@ -112,7 +112,7 @@ function Read-SingBoxLogDelta {
         }
 
         if (-not [string]::IsNullOrWhiteSpace($chunk)) {
-            $lines = $chunk -split "(`r`n|`n|`r)"
+            $lines = $chunk -split "\r?\n|\r"
             foreach ($raw in $lines) {
                 if ([string]::IsNullOrWhiteSpace($raw)) { continue }
                 $clean = ([string]$raw) -replace '\x1b\[[0-9;]*m', ''
@@ -215,7 +215,7 @@ function Build-SingBoxConfigFromVless([string]$vlessUrl, [string[]]$vpnDomains) 
         dns = @{
             servers = @(
                 @{ type = "https"; tag = "dns-remote"; server = "1.1.1.1"; server_port = 443; path = "/dns-query"; detour = "vless-out" },
-                @{ type = "udp"; tag = "dns-local"; server = "8.8.8.8"; server_port = 53 }
+                @{ type = "local"; tag = "dns-local" }
             )
             rules = $dnsRules
             final = "dns-local"
