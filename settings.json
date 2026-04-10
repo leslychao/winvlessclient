@@ -20,6 +20,21 @@
                         "openai.com",
                         "chatgpt.com",
                         "auth.openai.com",
-                        "oaiusercontent.com"
+                        "oaiusercontent.com",
+                        "telegram.org",
+                        "*.telegram.org",
+                        "web.telegram.org",
+                        "*.web.telegram.org",
+                        "t.me",
+                        "*.t.me",
+                        "telegram.me",
+                        "*.telegram.me",
+                        "telegra.ph",
+                        "telesco.pe",
+                        "*.telesco.pe",
+                        "stel.com",
+                        "*.stel.com",
+                        "tg.dev",
+                        "*.tg.dev"
                     ]
 }
