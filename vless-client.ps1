@@ -79,7 +79,7 @@ function Release-AppResources {
 
 # UI
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "winvlessclient"
+$form.Text = "winvlessclient $script:AppVersion"
 $form.Size = New-Object System.Drawing.Size(900, 700)
 $form.MinimumSize = New-Object System.Drawing.Size(600, 500)
 $form.StartPosition = "CenterScreen"
@@ -93,7 +93,7 @@ try {
 } catch {
     $script:TrayIcon.Icon = [System.Drawing.SystemIcons]::Application
 }
-$script:TrayIcon.Text = "VLESS Client"
+$script:TrayIcon.Text = "VLESS Client $script:AppVersion"
 $script:TrayIcon.Visible = $false
 
 function Restore-FromTray {

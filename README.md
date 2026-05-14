@@ -1,5 +1,7 @@
 # winvlessclient (Windows 11)
 
+Current version: 1.1.0.
+
 Minimal desktop client with:
 - VLESS URL input (`vless://...`)
 - editable primary domain list in UI (one domain per line)

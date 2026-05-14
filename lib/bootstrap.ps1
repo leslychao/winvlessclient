@@ -1,4 +1,5 @@
 $script:AppRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$script:AppVersion = "1.1.0"
 $script:RuntimeDir = Join-Path $script:AppRoot "runtime"
 $script:ConnectionProfilePath = Join-Path $script:RuntimeDir "connection.private.json"
 $script:SeedSettingsPath = Join-Path $script:AppRoot "settings.json"
