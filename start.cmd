@@ -2,35 +2,29 @@
 setlocal
 cd /d "%~dp0"
 
+set "SING_BOX_VERSION=1.13.6"
+
 if not exist ".\runtime" (
   mkdir ".\runtime"
 )
 
-if not exist ".\runtime\sing-box.exe" (
-  echo sing-box.exe not found. Downloading latest Windows x64 release...
-  powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "$ErrorActionPreference='Stop';" ^
-    "$api='https://api.github.com/repos/SagerNet/sing-box/releases/latest';" ^
-    "$release=Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent'='winvlessclient' };" ^
-    "$asset=$release.assets | Where-Object { $_.name -match 'windows-amd64\.zip$' } | Select-Object -First 1;" ^
-    "if(-not $asset){ throw 'Windows amd64 asset not found in latest release'; };" ^
-    "$zip=Join-Path (Get-Location) 'sing-box.zip';" ^
-    "$tmp=Join-Path (Get-Location) '.singbox-extract';" ^
-    "if(Test-Path $zip){ Remove-Item $zip -Force };" ^
-    "if(Test-Path $tmp){ Remove-Item $tmp -Recurse -Force };" ^
-    "Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip;" ^
-    "Expand-Archive -Path $zip -DestinationPath $tmp -Force;" ^
-    "$exe=Get-ChildItem -Path $tmp -Recurse -Filter 'sing-box.exe' | Select-Object -First 1;" ^
-    "if(-not $exe){ throw 'sing-box.exe not found after extraction'; };" ^
-    "Copy-Item -Path $exe.FullName -Destination (Join-Path (Join-Path (Get-Location) 'runtime') 'sing-box.exe') -Force;" ^
-    "Remove-Item $zip -Force;" ^
-    "Remove-Item $tmp -Recurse -Force;"
-  if errorlevel 1 (
-    echo Failed to download sing-box.exe
-    pause
-    exit /b 1
-  )
-  echo runtime\sing-box.exe downloaded successfully.
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$ErrorActionPreference='Stop';" ^
+  "$version='%SING_BOX_VERSION%';" ^
+  "$runtime=Join-Path (Get-Location) 'runtime';" ^
+  "$exe=Join-Path $runtime 'sing-box.exe';" ^
+  "function Test-SingBoxVersion([string]$path,[string]$expected){ if(-not (Test-Path $path)){ return $false }; $line=(& $path version 2>$null | Select-Object -First 1); if($LASTEXITCODE -ne 0){ return $false }; return ($line -eq ('sing-box version ' + $expected)) };" ^
+  "if(Test-SingBoxVersion $exe $version){ Write-Host ('runtime\sing-box.exe pinned version ' + $version + ' is ready.'); exit 0 };" ^
+  "if(Test-Path $exe){ Write-Host ('Replacing runtime\sing-box.exe with pinned version ' + $version); Remove-Item $exe -Force } else { Write-Host ('sing-box.exe not found. Downloading pinned Windows x64 release ' + $version + '...') };" ^
+  "$file='sing-box-' + $version + '-windows-amd64.zip';" ^
+  "$url='https://github.com/SagerNet/sing-box/releases/download/v' + $version + '/' + $file;" ^
+  "$zip=Join-Path (Get-Location) $file;" ^
+  "$tmp=Join-Path (Get-Location) '.singbox-extract';" ^
+  "try { if(Test-Path $zip){ Remove-Item $zip -Force }; if(Test-Path $tmp){ Remove-Item $tmp -Recurse -Force }; Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $zip; Expand-Archive -Path $zip -DestinationPath $tmp -Force; $found=Get-ChildItem -Path $tmp -Recurse -Filter 'sing-box.exe' | Select-Object -First 1; if(-not $found){ throw 'sing-box.exe not found after extraction' }; Copy-Item -Path $found.FullName -Destination $exe -Force; if(-not (Test-SingBoxVersion $exe $version)){ throw 'Downloaded sing-box.exe version mismatch' }; Write-Host ('runtime\sing-box.exe downloaded successfully: ' + $version) } finally { if(Test-Path $zip){ Remove-Item $zip -Force -ErrorAction SilentlyContinue }; if(Test-Path $tmp){ Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue } }"
+if errorlevel 1 (
+  echo Failed to prepare pinned sing-box.exe %SING_BOX_VERSION%
+  pause
+  exit /b 1
 )
 
 net session >nul 2>&1

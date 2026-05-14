@@ -37,6 +37,10 @@ function Write-TextNoBom([string]$path, [string]$content) {
     [System.IO.File]::WriteAllText($path, $content, $utf8NoBom)
 }
 
+function Write-JsonNoBom([string]$path, [object]$value, [int]$depth) {
+    Write-TextNoBom -path $path -content ($value | ConvertTo-Json -Depth $depth)
+}
+
 function Get-DefaultVpnDomains {
     return @(
         "youtube.com",
@@ -49,29 +53,65 @@ function Get-DefaultVpnDomains {
     )
 }
 
-function Get-NormalizedDomainList([string]$rawText) {
-    $result = New-Object System.Collections.Generic.List[string]
-    if ([string]::IsNullOrWhiteSpace($rawText)) { return @() }
-    $lines = $rawText -split "\r?\n|\r"
-    foreach ($line in $lines) {
-        $item = $line.Trim().ToLowerInvariant()
-        if ([string]::IsNullOrWhiteSpace($item)) { continue }
-        if ($item.StartsWith("http://")) { $item = $item.Substring(7) }
-        if ($item.StartsWith("https://")) { $item = $item.Substring(8) }
-        if ($item.EndsWith("/")) { $item = $item.TrimEnd("/") }
-        if ($item.Contains("/")) { $item = $item.Split("/", 2)[0] }
-        if (-not [string]::IsNullOrWhiteSpace($item) -and -not $result.Contains($item)) {
-            $result.Add($item)
+function Normalize-DomainEntry([string]$rawDomain) {
+    if ([string]::IsNullOrWhiteSpace($rawDomain)) { return $null }
+
+    $item = $rawDomain.Trim().ToLowerInvariant()
+    if ($item -match "\s") { throw "Invalid VPN domain '$rawDomain': spaces are not allowed." }
+
+    if ($item.StartsWith("http://") -or $item.StartsWith("https://")) {
+        $uri = $null
+        if (-not [System.Uri]::TryCreate($item, [System.UriKind]::Absolute, [ref]$uri)) {
+            throw "Invalid VPN domain '$rawDomain': URL is not valid."
+        }
+        if ($uri.Authority -match ":\d+$") {
+            throw "Invalid VPN domain '$rawDomain': ports are not allowed."
+        }
+        $item = $uri.Host
+    } else {
+        $item = ($item -split "[/?#]", 2)[0]
+        if ($item -match ":\d+$") {
+            throw "Invalid VPN domain '$rawDomain': ports are not allowed."
         }
     }
+
+    if ($item.StartsWith("*.")) { $item = $item.Substring(2) }
+    $item = $item.TrimEnd([char]'.')
+    if ([string]::IsNullOrWhiteSpace($item)) { return $null }
+    if ($item.Contains("*")) { throw "Invalid VPN domain '$rawDomain': wildcards are only allowed as a leading '*.' prefix." }
+    if ($item.Length -gt 253) { throw "Invalid VPN domain '$rawDomain': domain is too long." }
+    if ($item.StartsWith(".") -or $item.EndsWith(".")) { throw "Invalid VPN domain '$rawDomain': empty labels are not allowed." }
+    if ($item -notmatch "^[a-z0-9.-]+$") { throw "Invalid VPN domain '$rawDomain': only ASCII letters, digits, dots and hyphens are allowed." }
+
+    foreach ($label in ($item -split "\.")) {
+        if ([string]::IsNullOrWhiteSpace($label)) { throw "Invalid VPN domain '$rawDomain': empty labels are not allowed." }
+        if ($label.Length -gt 63) { throw "Invalid VPN domain '$rawDomain': label '$label' is too long." }
+        if ($label.StartsWith("-") -or $label.EndsWith("-")) { throw "Invalid VPN domain '$rawDomain': label '$label' starts or ends with '-'." }
+    }
+
+    return $item
+}
+
+function Get-NormalizedDomainArray([string[]]$domains) {
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $result = New-Object System.Collections.Generic.List[string]
+    foreach ($d in $domains) {
+        $domain = Normalize-DomainEntry ([string]$d)
+        if ([string]::IsNullOrWhiteSpace($domain)) { continue }
+        if ($set.Add($domain)) { $result.Add($domain) }
+    }
     return $result.ToArray()
+}
+
+function Get-NormalizedDomainList([string]$rawText) {
+    if ([string]::IsNullOrWhiteSpace($rawText)) { return @() }
+    return Get-NormalizedDomainArray ($rawText -split "\r?\n|\r")
 }
 
 function Merge-RequiredVpnDomains([string[]]$domains) {
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     $result = New-Object System.Collections.Generic.List[string]
-    foreach ($d in $domains) {
-        if ([string]::IsNullOrWhiteSpace($d)) { continue }
+    foreach ($d in (Get-NormalizedDomainArray $domains)) {
         if ($set.Add($d)) { $result.Add($d) }
     }
     foreach ($required in (Get-DefaultVpnDomains)) {
@@ -138,65 +178,136 @@ function Parse-Query([string]$queryString) {
     foreach ($pair in $clean.Split("&")) {
         if ([string]::IsNullOrWhiteSpace($pair)) { continue }
         $parts = $pair.Split("=", 2)
-        $key = [System.Uri]::UnescapeDataString($parts[0])
+        $key = [System.Uri]::UnescapeDataString($parts[0].Replace("+", "%20")).Trim().ToLowerInvariant()
         $value = ""
-        if ($parts.Length -gt 1) { $value = [System.Uri]::UnescapeDataString($parts[1]) }
+        if ($parts.Length -gt 1) { $value = [System.Uri]::UnescapeDataString($parts[1].Replace("+", "%20")) }
+        if ([string]::IsNullOrWhiteSpace($key)) { throw "VLESS URL contains an empty query parameter name." }
         $result[$key] = $value
     }
     return $result
 }
 
-function Build-SingBoxConfigFromVless([string]$vlessUrl, [string[]]$vpnDomains) {
+function Get-QueryValue([hashtable]$params, [string]$key, [string]$defaultValue) {
+    if ($params.ContainsKey($key) -and -not [string]::IsNullOrWhiteSpace([string]$params[$key])) {
+        return [string]$params[$key]
+    }
+    return $defaultValue
+}
+
+function Get-NormalizedQueryValue([hashtable]$params, [string]$key, [string]$defaultValue) {
+    return (Get-QueryValue $params $key $defaultValue).Trim().ToLowerInvariant()
+}
+
+function Validate-TransportPath([string]$path, [string]$defaultValue) {
+    if ([string]::IsNullOrWhiteSpace($path)) { return $defaultValue }
+    $trimmed = $path.Trim()
+    if (-not $trimmed.StartsWith("/")) { throw "Transport path must start with '/'." }
+    return $trimmed
+}
+
+function Get-OptionalHost([hashtable]$params) {
+    $transportHost = Get-QueryValue $params "host" ""
+    if ([string]::IsNullOrWhiteSpace($transportHost)) { return "" }
+    return Normalize-DomainEntry $transportHost
+}
+
+function Build-SingBoxConfigFromVless([string]$vlessUrl, [string[]]$vpnDomains, [bool]$routeAllTraffic = $false) {
+    if ([string]::IsNullOrWhiteSpace($vlessUrl)) { throw "VLESS URL is empty." }
     $trimmed = $vlessUrl.Trim()
-    if (-not $trimmed.StartsWith("vless://")) { throw "VLESS URL must start with vless://" }
-    $uri = [Uri]$trimmed
+    $uri = $null
+    if (-not [System.Uri]::TryCreate($trimmed, [System.UriKind]::Absolute, [ref]$uri)) {
+        throw "VLESS URL is not valid."
+    }
+    if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals($uri.Scheme, "vless")) {
+        throw "VLESS URL must start with vless://"
+    }
     $params = Parse-Query $uri.Query
 
-    $uuid = $uri.UserInfo
+    $uuid = [System.Uri]::UnescapeDataString($uri.UserInfo)
     if ([string]::IsNullOrWhiteSpace($uuid)) { throw "UUID is missing in vless:// URL" }
+    $parsedUuid = [Guid]::Empty
+    if (-not [Guid]::TryParse($uuid, [ref]$parsedUuid)) { throw "UUID is not valid in vless:// URL" }
     if ([string]::IsNullOrWhiteSpace($uri.Host)) { throw "Server host is missing in vless:// URL" }
     if ($uri.Port -le 0) { throw "Server port is missing in vless:// URL" }
 
-    $security = if ($params.ContainsKey("security") -and -not [string]::IsNullOrWhiteSpace($params["security"])) { $params["security"] } else { "tls" }
-    $transportType = if ($params.ContainsKey("type") -and -not [string]::IsNullOrWhiteSpace($params["type"])) { $params["type"] } else { "tcp" }
+    $security = Get-NormalizedQueryValue $params "security" "tls"
+    $transportType = Get-NormalizedQueryValue $params "type" "tcp"
+    if (@("tls", "reality", "none") -notcontains $security) {
+        throw "Unsupported VLESS security '$security'. Supported values: tls, reality, none."
+    }
+    if (@("tcp", "ws", "grpc", "http", "httpupgrade", "quic") -notcontains $transportType) {
+        throw "Unsupported VLESS transport '$transportType'. Supported values: tcp, ws, grpc, http, httpupgrade, quic."
+    }
+
+    $flow = Get-QueryValue $params "flow" ""
+    if (-not [string]::IsNullOrWhiteSpace($flow) -and $flow -ne "xtls-rprx-vision") {
+        throw "Unsupported VLESS flow '$flow'. Supported value: xtls-rprx-vision."
+    }
 
     $tls = @{ enabled = $true; server_name = $uri.Host }
-    if ($params.ContainsKey("sni") -and -not [string]::IsNullOrWhiteSpace($params["sni"])) { $tls.server_name = $params["sni"] }
+    if ($params.ContainsKey("sni") -and -not [string]::IsNullOrWhiteSpace($params["sni"])) { $tls.server_name = Normalize-DomainEntry ([string]$params["sni"]) }
     if ($params.ContainsKey("fp") -and -not [string]::IsNullOrWhiteSpace($params["fp"])) {
-        $tls.utls = @{ enabled = $true; fingerprint = $params["fp"] }
+        $tls.utls = @{ enabled = $true; fingerprint = ([string]$params["fp"]).Trim().ToLowerInvariant() }
     }
     if ($security -eq "reality") {
         if (-not $params.ContainsKey("pbk") -or [string]::IsNullOrWhiteSpace($params["pbk"])) {
             throw "For security=reality, pbk query param is required"
         }
-        $tls.reality = @{ enabled = $true; public_key = $params["pbk"] }
-        if ($params.ContainsKey("sid") -and -not [string]::IsNullOrWhiteSpace($params["sid"])) { $tls.reality.short_id = $params["sid"] }
+        $tls.reality = @{ enabled = $true; public_key = ([string]$params["pbk"]).Trim() }
+        if ($params.ContainsKey("sid") -and -not [string]::IsNullOrWhiteSpace($params["sid"])) { $tls.reality.short_id = ([string]$params["sid"]).Trim() }
     } elseif ($security -eq "none") {
+        if ($params.ContainsKey("sni") -or $params.ContainsKey("fp") -or $params.ContainsKey("pbk") -or $params.ContainsKey("sid")) {
+            throw "TLS/Reality parameters cannot be used when security=none."
+        }
         $tls.enabled = $false
         $tls.Remove("server_name")
     }
 
     $outbound = @{
-        type = "vless"; tag = "vless-out"; server = $uri.Host; server_port = $uri.Port; uuid = $uuid
+        type = "vless"; tag = "vless-out"; server = $uri.Host; server_port = $uri.Port; uuid = $parsedUuid.ToString()
     }
-    if ($params.ContainsKey("flow") -and -not [string]::IsNullOrWhiteSpace($params["flow"])) { $outbound.flow = $params["flow"] }
+    if (-not [string]::IsNullOrWhiteSpace($flow)) { $outbound.flow = $flow }
     if ($tls.enabled) { $outbound.tls = $tls }
 
     switch ($transportType) {
+        "tcp" {}
         "ws" {
-            $path = if ($params.ContainsKey("path") -and -not [string]::IsNullOrWhiteSpace($params["path"])) { $params["path"] } else { "/" }
+            $path = Validate-TransportPath (Get-QueryValue $params "path" "/") "/"
             $transport = @{ type = "ws"; path = $path }
-            if ($params.ContainsKey("host") -and -not [string]::IsNullOrWhiteSpace($params["host"])) {
-                $transport.headers = @{ Host = $params["host"] }
+            $transportHost = Get-OptionalHost $params
+            if (-not [string]::IsNullOrWhiteSpace($transportHost)) {
+                $transport.headers = @{ Host = $transportHost }
             }
             $outbound.transport = $transport
         }
         "grpc" {
-            $serviceName = if ($params.ContainsKey("serviceName")) { $params["serviceName"] } elseif ($params.ContainsKey("service_name")) { $params["service_name"] } else { "" }
+            $serviceName = if ($params.ContainsKey("servicename")) { [string]$params["servicename"] } elseif ($params.ContainsKey("service_name")) { [string]$params["service_name"] } else { "" }
             $transport = @{ type = "grpc" }
-            if (-not [string]::IsNullOrWhiteSpace($serviceName)) { $transport.service_name = $serviceName }
+            if (-not [string]::IsNullOrWhiteSpace($serviceName)) { $transport.service_name = $serviceName.Trim() }
             $outbound.transport = $transport
         }
+        "http" {
+            $transport = @{ type = "http" }
+            $path = Validate-TransportPath (Get-QueryValue $params "path" "") ""
+            if (-not [string]::IsNullOrWhiteSpace($path)) { $transport.path = $path }
+            $transportHost = Get-OptionalHost $params
+            if (-not [string]::IsNullOrWhiteSpace($transportHost)) { $transport.host = @($transportHost) }
+            $outbound.transport = $transport
+        }
+        "httpupgrade" {
+            $transport = @{ type = "httpupgrade"; path = (Validate-TransportPath (Get-QueryValue $params "path" "/") "/") }
+            $transportHost = Get-OptionalHost $params
+            if (-not [string]::IsNullOrWhiteSpace($transportHost)) { $transport.host = $transportHost }
+            $outbound.transport = $transport
+        }
+        "quic" {
+            $outbound.transport = @{ type = "quic" }
+        }
+    }
+
+    $normalizedDomains = Get-NormalizedDomainArray $vpnDomains
+    if (-not $routeAllTraffic -and (-not $normalizedDomains -or $normalizedDomains.Count -eq 0)) {
+        throw "VPN domain list is empty."
     }
 
     $dnsRules = @()
@@ -205,9 +316,15 @@ function Build-SingBoxConfigFromVless([string]$vlessUrl, [string[]]$vpnDomains) 
         @{ port = 53; action = "hijack-dns" },
         @{ protocol = "dns"; action = "hijack-dns" }
     )
-    if ($vpnDomains -and $vpnDomains.Count -gt 0) {
-        $dnsRules += @{ domain_suffix = $vpnDomains; server = "dns-remote" }
-        $routeRules += @{ domain_suffix = $vpnDomains; outbound = "vless-out" }
+    $dnsFinal = "dns-local"
+    $routeFinal = "direct"
+    if ($routeAllTraffic) {
+        $dnsFinal = "dns-remote"
+        $routeFinal = "vless-out"
+        $routeRules += @{ ip_is_private = $true; outbound = "direct" }
+    } else {
+        $dnsRules += @{ domain_suffix = $normalizedDomains; server = "dns-remote" }
+        $routeRules += @{ domain_suffix = $normalizedDomains; outbound = "vless-out" }
     }
 
     return @{
@@ -218,7 +335,7 @@ function Build-SingBoxConfigFromVless([string]$vlessUrl, [string[]]$vpnDomains) 
                 @{ type = "udp"; tag = "dns-local"; server = "8.8.8.8"; server_port = 53 }
             )
             rules = $dnsRules
-            final = "dns-local"
+            final = $dnsFinal
             strategy = "prefer_ipv4"
             independent_cache = $true
             reverse_mapping = $true
@@ -230,8 +347,42 @@ function Build-SingBoxConfigFromVless([string]$vlessUrl, [string[]]$vpnDomains) 
             $outbound,
             @{ type = "direct"; tag = "direct" }
         )
-        route = @{ final = "direct"; auto_detect_interface = $true; default_domain_resolver = "dns-local"; rules = $routeRules }
+        route = @{ final = $routeFinal; auto_detect_interface = $true; default_domain_resolver = "dns-local"; rules = $routeRules }
     }
+}
+
+function Assert-SingBoxConfigValid([string]$singboxPath, [string]$configPath) {
+    if ([string]::IsNullOrWhiteSpace($singboxPath) -or -not (Test-Path $singboxPath)) {
+        throw "sing-box.exe not found: $singboxPath"
+    }
+    if ([string]::IsNullOrWhiteSpace($configPath) -or -not (Test-Path $configPath)) {
+        throw "sing-box config not found: $configPath"
+    }
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $singboxPath
+    $psi.Arguments = ('check -c "{0}"' -f ($configPath -replace '"', '\"'))
+    $psi.WorkingDirectory = $script:AppRoot
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    if (-not $proc.Start()) { throw "Failed to start sing-box config validation." }
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $stderr = $proc.StandardError.ReadToEnd()
+    if (-not $proc.WaitForExit(15000)) {
+        try { $proc.Kill() } catch {}
+        throw "sing-box config validation timed out."
+    }
+    if ($proc.ExitCode -ne 0) {
+        $details = (($stdout, $stderr) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join [Environment]::NewLine
+        if ([string]::IsNullOrWhiteSpace($details)) { $details = "exit code " + $proc.ExitCode }
+        throw "sing-box config validation failed: $details"
+    }
+    return $true
 }
 
 function Get-DefaultClientProfile {
@@ -240,25 +391,27 @@ function Get-DefaultClientProfile {
         singbox_path = $defaultSingboxPath
         vless_url = ""
         primary_domains_text = (Get-DefaultVpnDomains) -join [Environment]::NewLine
+        route_all_traffic = $false
     }
 }
 
 function Save-ConnectionProfile([string]$vlessUrl) {
-    Write-TextNoBom -path $script:ConnectionProfilePath -content (@{
+    Write-JsonNoBom -path $script:ConnectionProfilePath -value @{
             vless_url = $vlessUrl
-        } | ConvertTo-Json -Depth 4)
+        } -depth 4
 }
 
-function Save-SettingsProfile([string]$primaryDomainsText) {
+function Save-SettingsProfile([string]$primaryDomainsText, [bool]$routeAllTraffic = $false) {
     $vpnDomains = Merge-RequiredVpnDomains (Get-NormalizedDomainList $primaryDomainsText)
-    Write-TextNoBom -path $script:SettingsPath -content (@{
-            vpn_domains = $vpnDomains
-        } | ConvertTo-Json -Depth 4)
+    Write-JsonNoBom -path $script:SettingsPath -value @{
+            vpn_domains = @($vpnDomains)
+            route_all_traffic = $routeAllTraffic
+        } -depth 4
 }
 
 function Save-Profile([hashtable]$profile) {
     Save-ConnectionProfile ([string]$profile.vless_url)
-    Save-SettingsProfile ([string]$profile.primary_domains_text)
+    Save-SettingsProfile ([string]$profile.primary_domains_text) ([bool]$profile.route_all_traffic)
 }
 
 function Try-MigrateLegacyProfile {
@@ -276,12 +429,40 @@ function Try-MigrateLegacyProfile {
         Save-ConnectionProfile ([string]$legacy.vless_url)
     }
     if ($needSettingsMigration) {
-        Save-SettingsProfile ([string]$legacy.primary_domains_text)
+        Save-SettingsProfile ([string]$legacy.primary_domains_text) (Get-BooleanProperty $legacy "route_all_traffic" $false)
     }
 
     try {
         Remove-Item -Path $legacyPath -Force -ErrorAction SilentlyContinue
     } catch {}
+}
+
+function Read-DomainSettingsText([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path $path)) { return $null }
+    $settings = (Get-Content -Path $path -Raw -Encoding UTF8) | ConvertFrom-Json
+    if (-not $settings.vpn_domains) { return $null }
+    $domains = Get-NormalizedDomainArray @($settings.vpn_domains)
+    if (-not $domains -or $domains.Count -eq 0) { return $null }
+    return ($domains -join [Environment]::NewLine)
+}
+
+function Get-BooleanProperty([object]$settings, [string]$name, [bool]$defaultValue) {
+    if (-not $settings -or -not ($settings.PSObject.Properties.Name -contains $name)) { return $defaultValue }
+    $value = $settings.$name
+    if ($null -eq $value) { return $defaultValue }
+    if ($value -is [bool]) { return [bool]$value }
+
+    $parsed = $false
+    $text = ([string]$value).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) { return $defaultValue }
+    if ([bool]::TryParse($text, [ref]$parsed)) { return $parsed }
+    throw "Invalid boolean setting '$name'."
+}
+
+function Read-RouteAllTrafficSetting([string]$path, [bool]$defaultValue) {
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path $path)) { return $defaultValue }
+    $settings = (Get-Content -Path $path -Raw -Encoding UTF8) | ConvertFrom-Json
+    return Get-BooleanProperty $settings "route_all_traffic" $defaultValue
 }
 
 function Load-Profile {
@@ -297,25 +478,30 @@ function Load-Profile {
     }
 
     $primaryText = $default.primary_domains_text
+    $routeAllTraffic = [bool]$default.route_all_traffic
     if (Test-Path $script:SettingsPath) {
         try {
-            $settings = (Get-Content -Path $script:SettingsPath -Raw -Encoding UTF8) | ConvertFrom-Json
-            if ($settings.vpn_domains) {
-                $candidateDomains = @($settings.vpn_domains) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { ([string]$_).Trim().ToLowerInvariant() }
-                if ($candidateDomains.Count -gt 0) {
-                    $primaryText = ($candidateDomains -join [Environment]::NewLine)
-                }
-            } else {
-                $candidateDomains = [string]$settings.primary_domains_text
-                if (-not [string]::IsNullOrWhiteSpace($candidateDomains)) { $primaryText = $candidateDomains }
-            }
-        } catch {}
+            $runtimeText = Read-DomainSettingsText $script:SettingsPath
+            if (-not [string]::IsNullOrWhiteSpace($runtimeText)) { $primaryText = $runtimeText }
+            $routeAllTraffic = Read-RouteAllTrafficSetting $script:SettingsPath $false
+        } catch {
+            Append-FileLog ("Runtime settings ignored: " + $_.Exception.Message)
+        }
+    } elseif ($script:SeedSettingsPath -and (Test-Path $script:SeedSettingsPath)) {
+        try {
+            $seedText = Read-DomainSettingsText $script:SeedSettingsPath
+            if (-not [string]::IsNullOrWhiteSpace($seedText)) { $primaryText = $seedText }
+            $routeAllTraffic = Read-RouteAllTrafficSetting $script:SeedSettingsPath $false
+        } catch {
+            Append-FileLog ("Seed settings ignored: " + $_.Exception.Message)
+        }
     }
 
     return @{
         singbox_path = $default.singbox_path
         vless_url = $vlessUrl
         primary_domains_text = $primaryText
+        route_all_traffic = $routeAllTraffic
     }
 }
 

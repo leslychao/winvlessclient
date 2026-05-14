@@ -17,6 +17,11 @@ public static class ConsoleWindow {
 . "$PSScriptRoot\lib\core.ps1"
 . "$PSScriptRoot\lib\process.ps1"
 
+if (-not (Enter-SingleInstance)) {
+    [System.Windows.Forms.MessageBox]::Show("VLESS Client is already running.", "VLESS Client", "OK", "Information") | Out-Null
+    exit 0
+}
+
 try {
     $h = [ConsoleWindow]::GetConsoleWindow()
     if ($h -ne [IntPtr]::Zero) {
@@ -42,6 +47,9 @@ function Release-AppResources {
             [JobObjectApi]::CloseHandle($script:JobHandle) | Out-Null
             $script:JobHandle = [IntPtr]::Zero
         }
+    } catch {}
+    try {
+        Release-SingleInstance
     } catch {}
 }
 
@@ -166,23 +174,30 @@ $btnDisconnect.Size = New-Object System.Drawing.Size(120, 36)
 $btnDisconnect.Enabled = $false
 $form.Controls.Add($btnDisconnect)
 
+$chkRouteAllTraffic = New-Object System.Windows.Forms.CheckBox
+$chkRouteAllTraffic.Text = "Route all traffic through VPN"
+$chkRouteAllTraffic.Location = New-Object System.Drawing.Point(290, 276)
+$chkRouteAllTraffic.Size = New-Object System.Drawing.Size(220, 24)
+$chkRouteAllTraffic.Anchor = "Top,Left"
+$form.Controls.Add($chkRouteAllTraffic)
+
 $lblStatus = New-Object System.Windows.Forms.Label
 $lblStatus.Text = "Status: Disconnected (Selective VPN mode)"
-$lblStatus.Location = New-Object System.Drawing.Point(290, 278)
-$lblStatus.Size = New-Object System.Drawing.Size(560, 24)
+$lblStatus.Location = New-Object System.Drawing.Point(16, 316)
+$lblStatus.Size = New-Object System.Drawing.Size(850, 24)
 $lblStatus.Anchor = "Top,Left,Right"
 $form.Controls.Add($lblStatus)
 
 $btnCopyLog = New-Object System.Windows.Forms.Button
 $btnCopyLog.Text = "Copy"
-$btnCopyLog.Location = New-Object System.Drawing.Point(760, 316)
+$btnCopyLog.Location = New-Object System.Drawing.Point(760, 346)
 $btnCopyLog.Size = New-Object System.Drawing.Size(50, 26)
 $btnCopyLog.Anchor = "Top,Right"
 $form.Controls.Add($btnCopyLog)
 
 $btnClearLog = New-Object System.Windows.Forms.Button
 $btnClearLog.Text = "Clear"
-$btnClearLog.Location = New-Object System.Drawing.Point(816, 316)
+$btnClearLog.Location = New-Object System.Drawing.Point(816, 346)
 $btnClearLog.Size = New-Object System.Drawing.Size(50, 26)
 $btnClearLog.Anchor = "Top,Right"
 $form.Controls.Add($btnClearLog)
@@ -198,8 +213,8 @@ $txtLogs.Add_KeyDown({
         $_.SuppressKeyPress = $true
     }
 })
-$txtLogs.Location = New-Object System.Drawing.Point(16, 346)
-$txtLogs.Size = New-Object System.Drawing.Size(850, 304)
+$txtLogs.Location = New-Object System.Drawing.Point(16, 376)
+$txtLogs.Size = New-Object System.Drawing.Size(850, 274)
 $txtLogs.Anchor = "Top,Bottom,Left,Right"
 $form.Controls.Add($txtLogs)
 
@@ -229,6 +244,7 @@ $splitter.Add_MouseMove({
     $splitter.Top += $shift
     $btnConnect.Top += $shift
     $btnDisconnect.Top += $shift
+    $chkRouteAllTraffic.Top += $shift
     $lblStatus.Top += $shift
     $btnCopyLog.Top += $shift
     $btnClearLog.Top += $shift
@@ -253,6 +269,45 @@ function Append-Log([string]$message) {
     Append-FileLog $message
 }
 
+function Get-RouteModeLabel {
+    if ($chkRouteAllTraffic -and $chkRouteAllTraffic.Checked) { return "Full VPN mode" }
+    return "Selective VPN mode"
+}
+
+function Test-SingBoxRunning {
+    return ($script:ProcessRef -and -not $script:ProcessRef.HasExited)
+}
+
+function Set-ConnectionState([string]$state) {
+    $routeMode = Get-RouteModeLabel
+    switch ($state) {
+        "Connecting" {
+            $btnConnect.Enabled = $false
+            $btnDisconnect.Enabled = $false
+            $chkRouteAllTraffic.Enabled = $false
+            $lblStatus.Text = "Status: Connecting ($routeMode)"
+        }
+        "Connected" {
+            $btnConnect.Enabled = $false
+            $btnDisconnect.Enabled = $true
+            $chkRouteAllTraffic.Enabled = $true
+            $lblStatus.Text = "Status: Connected ($routeMode)"
+        }
+        "Error" {
+            $btnConnect.Enabled = $true
+            $btnDisconnect.Enabled = $false
+            $chkRouteAllTraffic.Enabled = $true
+            $lblStatus.Text = "Status: Error ($routeMode)"
+        }
+        default {
+            $btnConnect.Enabled = $true
+            $btnDisconnect.Enabled = $false
+            $chkRouteAllTraffic.Enabled = $true
+            $lblStatus.Text = "Status: Disconnected ($routeMode)"
+        }
+    }
+}
+
 $btnCopyLog.Add_Click({
     if ($txtLogs.TextLength -gt 0) {
         [System.Windows.Forms.Clipboard]::SetText($txtLogs.Text)
@@ -272,9 +327,7 @@ $script:HealthTimer.Add_Tick({
             $exitCode = $script:ProcessRef.ExitCode
             $script:HealthTimer.Stop()
             $script:ProcessRef = $null
-            $btnConnect.Enabled = $true
-            $btnDisconnect.Enabled = $false
-            $lblStatus.Text = "Status: Disconnected (Selective VPN mode)"
+            Set-ConnectionState "Disconnected"
             Append-Log ("sing-box exited with code: " + $exitCode)
         }
     } catch {
@@ -289,6 +342,13 @@ if ([string]::IsNullOrWhiteSpace([string]$profile.primary_domains_text)) {
 } else {
     $txtDomains.Text = [string]$profile.primary_domains_text
 }
+$script:RouteModeUpdating = $true
+try {
+    $chkRouteAllTraffic.Checked = [bool]$profile.route_all_traffic
+} finally {
+    $script:RouteModeUpdating = $false
+}
+Set-ConnectionState "Disconnected"
 Ensure-JobObject
 
 $form.Add_Shown({
@@ -302,13 +362,14 @@ $form.Add_Shown({
     }
 })
 
-$btnConnect.Add_Click({
+function Start-VpnConnection {
     try {
+        Set-ConnectionState "Connecting"
         $singboxPath = [string]$profile.singbox_path
         if (-not (Test-Path $singboxPath)) { throw "sing-box.exe not found: $singboxPath" }
-        if (-not (Test-IsAdmin)) { throw "Selective VPN mode (TUN) requires Administrator rights. Restart start.cmd as Administrator." }
+        if (-not (Test-IsAdmin)) { throw "VPN mode (TUN) requires Administrator rights. Restart start.cmd as Administrator." }
 
-        if ($script:ProcessRef -and -not $script:ProcessRef.HasExited) {
+        if (Test-SingBoxRunning) {
             if ($script:HealthTimer) { $script:HealthTimer.Stop() }
             Stop-SingBox
             Append-Log "Stopped previous connection."
@@ -323,10 +384,14 @@ $btnConnect.Add_Click({
         if ([string]::IsNullOrWhiteSpace($vlessUrl)) { throw "VLESS URL is empty" }
 
         $vpnDomains = Merge-RequiredVpnDomains (Get-NormalizedDomainList $txtDomains.Text)
-        if (-not $vpnDomains -or $vpnDomains.Count -eq 0) { throw "Primary domain list is empty. Add at least one domain." }
+        $routeAllTraffic = [bool]$chkRouteAllTraffic.Checked
+        if (-not $routeAllTraffic -and (-not $vpnDomains -or $vpnDomains.Count -eq 0)) {
+            throw "Primary domain list is empty. Add at least one domain."
+        }
 
-        $config = Build-SingBoxConfigFromVless $vlessUrl $vpnDomains
+        $config = Build-SingBoxConfigFromVless $vlessUrl $vpnDomains $routeAllTraffic
         Write-TextNoBom -path $script:ConfigPath -content ($config | ConvertTo-Json -Depth 20)
+        Assert-SingBoxConfigValid $singboxPath $script:ConfigPath | Out-Null
         if (Test-Path $script:SingBoxLogPath) {
             Remove-Item -Path $script:SingBoxLogPath -Force -ErrorAction SilentlyContinue
         }
@@ -335,7 +400,11 @@ $btnConnect.Add_Click({
         Save-Profile @{
             vless_url = $vlessUrl
             primary_domains_text = ($vpnDomains -join [Environment]::NewLine)
+            route_all_traffic = $routeAllTraffic
         }
+        $profile["vless_url"] = $vlessUrl
+        $profile["primary_domains_text"] = ($vpnDomains -join [Environment]::NewLine)
+        $profile["route_all_traffic"] = $routeAllTraffic
 
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $singboxPath
@@ -353,26 +422,66 @@ $btnConnect.Add_Click({
         $script:ProcessRef = $proc
 
         $script:HealthTimer.Start()
-        $btnDisconnect.Enabled = $true
-        $lblStatus.Text = "Status: Connected (Selective VPN mode)"
-        Append-Log ("Connected. PID=" + $proc.Id + ", TUN=sb-vpn, domains=" + $vpnDomains.Count)
+        Set-ConnectionState "Connected"
+        if ($routeAllTraffic) {
+            Append-Log ("Connected. PID=" + $proc.Id + ", TUN=sb-vpn, mode=full")
+        } else {
+            Append-Log ("Connected. PID=" + $proc.Id + ", TUN=sb-vpn, mode=selective, domains=" + $vpnDomains.Count)
+        }
     } catch {
         if ($script:HealthTimer) { $script:HealthTimer.Stop() }
         Stop-SingBox
-        $btnConnect.Enabled = $true
-        $btnDisconnect.Enabled = $false
-        $lblStatus.Text = "Status: Error (Selective VPN mode)"
+        Set-ConnectionState "Error"
         Append-Log ("ERROR: " + $_.Exception.Message)
         [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Connection error", "OK", "Error") | Out-Null
+    }
+}
+
+$btnConnect.Add_Click({
+    Start-VpnConnection
+})
+
+$chkRouteAllTraffic.Add_CheckedChanged({
+    if ($script:RouteModeUpdating) { return }
+    $routeAllTraffic = [bool]$chkRouteAllTraffic.Checked
+    try {
+        $vpnDomains = Merge-RequiredVpnDomains (Get-NormalizedDomainList $txtDomains.Text)
+        Save-Profile @{
+            vless_url = $txtVless.Text.Trim()
+            primary_domains_text = ($vpnDomains -join [Environment]::NewLine)
+            route_all_traffic = $routeAllTraffic
+        }
+        $profile["vless_url"] = $txtVless.Text.Trim()
+        $profile["primary_domains_text"] = ($vpnDomains -join [Environment]::NewLine)
+        $profile["route_all_traffic"] = $routeAllTraffic
+        if (Test-SingBoxRunning) {
+            Append-Log ("Routing mode changed to " + (Get-RouteModeLabel) + ". Reconnecting.")
+            Start-VpnConnection
+        } else {
+            Set-ConnectionState "Disconnected"
+            Append-Log ("Routing mode saved: " + (Get-RouteModeLabel))
+        }
+    } catch {
+        $script:RouteModeUpdating = $true
+        try {
+            $chkRouteAllTraffic.Checked = -not $routeAllTraffic
+        } finally {
+            $script:RouteModeUpdating = $false
+        }
+        if (Test-SingBoxRunning) {
+            Set-ConnectionState "Connected"
+        } else {
+            Set-ConnectionState "Disconnected"
+        }
+        Append-Log ("ERROR: " + $_.Exception.Message)
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Routing mode error", "OK", "Error") | Out-Null
     }
 })
 
 $btnDisconnect.Add_Click({
     if ($script:HealthTimer) { $script:HealthTimer.Stop() }
     Stop-SingBox
-    $btnConnect.Enabled = $true
-    $btnDisconnect.Enabled = $false
-    $lblStatus.Text = "Status: Disconnected (Selective VPN mode)"
+    Set-ConnectionState "Disconnected"
     Append-Log "Disconnected."
 })
 

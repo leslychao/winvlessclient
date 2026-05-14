@@ -1,7 +1,8 @@
 $script:AppRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $script:RuntimeDir = Join-Path $script:AppRoot "runtime"
 $script:ConnectionProfilePath = Join-Path $script:RuntimeDir "connection.private.json"
-$script:SettingsPath = Join-Path $script:AppRoot "settings.json"
+$script:SeedSettingsPath = Join-Path $script:AppRoot "settings.json"
+$script:SettingsPath = Join-Path $script:RuntimeDir "settings.json"
 $script:ConfigPath = Join-Path $script:RuntimeDir "config.json"
 $script:ClientLogPath = Join-Path $script:RuntimeDir "client.log"
 $script:SingBoxLogPath = Join-Path $script:RuntimeDir "sing-box.log"
@@ -13,10 +14,20 @@ if (-not (Test-Path $script:RuntimeDir)) {
 $script:ProcessRef = $null
 $script:HealthTimer = $null
 $script:JobHandle = [IntPtr]::Zero
+$script:InstanceMutex = $null
 $script:LastSingBoxLogOffset = 0
 $script:ClientLogMaxBytes = 1MB
 $script:SingBoxLogMaxBytes = 5MB
 $script:LogBackupCount = 3
+
+$appRootBytes = [System.Text.Encoding]::UTF8.GetBytes($script:AppRoot.ToLowerInvariant())
+$sha256 = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $appRootHash = [BitConverter]::ToString($sha256.ComputeHash($appRootBytes)).Replace("-", "").Substring(0, 16)
+} finally {
+    $sha256.Dispose()
+}
+$script:InstanceMutexName = "Local\winvlessclient-$appRootHash"
 
 Add-Type @"
 using System;
