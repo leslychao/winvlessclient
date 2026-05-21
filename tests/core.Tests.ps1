@@ -82,6 +82,7 @@ Describe "VLESS config builder" {
         $full = Build-SingBoxConfigFromVless $url @() $true
         $full.dns.final | Should Be "dns-remote"
         $full.route.final | Should Be "vless-out"
+        $full.inbounds[0].strict_route | Should Be $true
         (@($full.route.rules | Where-Object { $_.domain_suffix }).Count) | Should Be 0
         (@($full.route.rules | Where-Object { $_.ip_is_private -eq $true -and $_.outbound -eq "direct" }).Count) | Should Be 1
     }
@@ -105,6 +106,140 @@ Describe "VLESS config builder" {
                 { Assert-SingBoxConfigValid $singboxPath $script:ConfigPath } | Should Not Throw
             }
         }
+    }
+}
+
+Describe "Legacy route state validation" {
+    It "accepts the expected previous route state shape" {
+        $state = @"
+{
+  "default_routes": [
+    {
+      "destination_prefix": "0.0.0.0/0",
+      "interface_index": 12,
+      "next_hop": "192.168.1.1",
+      "route_metric": 25
+    }
+  ],
+  "host_routes": [
+    {
+      "destination_prefix": "203.0.113.10/32",
+      "interface_index": 12,
+      "next_hop": "192.168.1.1",
+      "created": true
+    }
+  ]
+}
+"@ | ConvertFrom-Json
+
+        $validated = ConvertTo-ValidatedLegacyRouteState $state
+
+        $validated.default_routes[0].destination_prefix | Should Be "0.0.0.0/0"
+        $validated.default_routes[0].route_metric | Should Be 25
+        $validated.host_routes[0].destination_prefix | Should Be "203.0.113.10/32"
+        $validated.host_routes[0].created | Should Be $true
+    }
+
+    It "rejects malformed or out-of-scope previous route state" {
+        {
+            ConvertTo-ValidatedLegacyRouteState @{
+                default_routes = @(
+                    @{
+                        destination_prefix = "10.0.0.0/8"
+                        interface_index = 12
+                        next_hop = "192.168.1.1"
+                        route_metric = 25
+                    }
+                )
+            }
+        } | Should Throw "0.0.0.0/0"
+
+        {
+            ConvertTo-ValidatedLegacyRouteState @{
+                host_routes = @(
+                    @{
+                        destination_prefix = "203.0.113.10/24"
+                        interface_index = 12
+                        next_hop = "192.168.1.1"
+                        created = $true
+                    }
+                )
+            }
+        } | Should Throw "IPv4 /32"
+
+        {
+            ConvertTo-ValidatedLegacyRouteState @{
+                default_routes = @(
+                    @{
+                        destination_prefix = "0.0.0.0/0"
+                        interface_index = 0
+                        next_hop = "192.168.1.1"
+                        route_metric = 25
+                    }
+                )
+            }
+        } | Should Throw "interface_index"
+    }
+}
+
+Describe "VPN connection path regressions" {
+    It "does not enable route-based kill switch during connect" {
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $repoRoot "vless-client.ps1"), [ref]$tokens, [ref]$errors)
+        $errors.Count | Should Be 0
+
+        $startFunction = $ast.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq "Start-VpnConnection"
+        }, $true)
+        $startFunction | Should Not Be $null
+
+        $connectCommands = @($startFunction.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst]
+        }, $true) | ForEach-Object { $_.GetCommandName() } | Where-Object { $_ })
+
+        ($connectCommands -contains "Enable-KillSwitch") | Should Be $false
+        ($connectCommands -contains "Get-KillSwitchServerAddress") | Should Be $false
+        ($connectCommands -contains "New-NetRoute") | Should Be $false
+        ($connectCommands -contains "Remove-NetRoute") | Should Be $false
+    }
+
+    It "builds full mode without overriding the VLESS server address" {
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $repoRoot "vless-client.ps1"), [ref]$tokens, [ref]$errors)
+        $errors.Count | Should Be 0
+
+        $startFunction = $ast.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq "Start-VpnConnection"
+        }, $true)
+        $startFunction | Should Not Be $null
+
+        $buildCommand = $startFunction.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -eq "Build-SingBoxConfigFromVless"
+        }, $true)
+        $buildCommand | Should Not Be $null
+        @($buildCommand.CommandElements).Count | Should Be 4
+    }
+}
+
+Describe "UI regressions" {
+    It "keeps the log pause button and buffering path" {
+        $scriptText = Get-Content -Path (Join-Path $repoRoot "vless-client.ps1") -Raw -Encoding UTF8
+
+        $scriptText | Should Match '\$btnPauseLog\s*=\s*New-Object System\.Windows\.Forms\.Button'
+        $scriptText | Should Match '\$btnPauseLog\.Text\s*=\s*"Pause"'
+        $scriptText | Should Match '\$btnPauseLog\.Add_Click'
+        $scriptText | Should Match '\$script:LogsPaused'
+        $scriptText | Should Match 'Queue-PausedLogLine'
+        $scriptText | Should Match 'Flush-PausedLogLines'
     }
 }
 

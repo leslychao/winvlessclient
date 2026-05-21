@@ -7,6 +7,7 @@ $script:SettingsPath = Join-Path $script:RuntimeDir "settings.json"
 $script:ConfigPath = Join-Path $script:RuntimeDir "config.json"
 $script:ClientLogPath = Join-Path $script:RuntimeDir "client.log"
 $script:SingBoxLogPath = Join-Path $script:RuntimeDir "sing-box.log"
+$script:LegacyRouteStatePath = Join-Path $script:RuntimeDir "killswitch.routes.json"
 
 if (-not (Test-Path $script:RuntimeDir)) {
     New-Item -Path $script:RuntimeDir -ItemType Directory | Out-Null
@@ -17,6 +18,7 @@ $script:HealthTimer = $null
 $script:JobHandle = [IntPtr]::Zero
 $script:InstanceMutex = $null
 $script:LastSingBoxLogOffset = 0
+$script:LegacyRouteRestorePending = $false
 $script:ClientLogMaxBytes = 1MB
 $script:SingBoxLogMaxBytes = 5MB
 $script:LogBackupCount = 3

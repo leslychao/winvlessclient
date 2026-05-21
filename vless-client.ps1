@@ -37,6 +37,9 @@ function Release-AppResources {
         Stop-SingBox
     } catch {}
     try {
+        Restore-LegacyRouteState
+    } catch {}
+    try {
         if ($script:TrayIcon) {
             $script:TrayIcon.Visible = $false
             $script:TrayIcon.Dispose()
@@ -188,6 +191,13 @@ $lblStatus.Size = New-Object System.Drawing.Size(850, 24)
 $lblStatus.Anchor = "Top,Left,Right"
 $form.Controls.Add($lblStatus)
 
+$btnPauseLog = New-Object System.Windows.Forms.Button
+$btnPauseLog.Text = "Pause"
+$btnPauseLog.Location = New-Object System.Drawing.Point(692, 346)
+$btnPauseLog.Size = New-Object System.Drawing.Size(62, 26)
+$btnPauseLog.Anchor = "Top,Right"
+$form.Controls.Add($btnPauseLog)
+
 $btnCopyLog = New-Object System.Windows.Forms.Button
 $btnCopyLog.Text = "Copy"
 $btnCopyLog.Location = New-Object System.Drawing.Point(760, 346)
@@ -246,6 +256,7 @@ $splitter.Add_MouseMove({
     $btnDisconnect.Top += $shift
     $chkRouteAllTraffic.Top += $shift
     $lblStatus.Top += $shift
+    $btnPauseLog.Top += $shift
     $btnCopyLog.Top += $shift
     $btnClearLog.Top += $shift
     $txtLogs.Top += $shift
@@ -258,13 +269,45 @@ $splitter.Add_MouseUp({
     $splitter.Capture = $false
 })
 
+$script:LogsPaused = $false
+$script:PausedLogLines = New-Object 'System.Collections.Generic.Queue[string]'
+$script:PausedLogMaxLines = 1000
+$script:PausedLogDropped = 0
+
+function Add-LogLineToTextBox([string]$line) {
+    if ($txtLogs.TextLength -gt 200000) {
+        $txtLogs.Text = $txtLogs.Text.Substring($txtLogs.TextLength - 100000)
+    }
+    $txtLogs.AppendText($line + [Environment]::NewLine)
+}
+
+function Queue-PausedLogLine([string]$line) {
+    if ($script:PausedLogLines.Count -ge $script:PausedLogMaxLines) {
+        [void]$script:PausedLogLines.Dequeue()
+        $script:PausedLogDropped++
+    }
+    $script:PausedLogLines.Enqueue($line)
+}
+
+function Flush-PausedLogLines {
+    if ($script:PausedLogDropped -gt 0) {
+        $line = "[{0}] Paused log display dropped older lines: {1}" -f (Get-Date -Format "HH:mm:ss"), $script:PausedLogDropped
+        Add-LogLineToTextBox $line
+    }
+    while ($script:PausedLogLines.Count -gt 0) {
+        Add-LogLineToTextBox $script:PausedLogLines.Dequeue()
+    }
+    $script:PausedLogDropped = 0
+}
+
 function Append-Log([string]$message) {
     try {
         $line = "[{0}] {1}" -f (Get-Date -Format "HH:mm:ss"), $message
-        if ($txtLogs.TextLength -gt 200000) {
-            $txtLogs.Text = $txtLogs.Text.Substring($txtLogs.TextLength - 100000)
+        if ($script:LogsPaused) {
+            Queue-PausedLogLine $line
+        } else {
+            Add-LogLineToTextBox $line
         }
-        $txtLogs.AppendText($line + [Environment]::NewLine)
     } catch {}
     Append-FileLog $message
 }
@@ -276,6 +319,47 @@ function Get-RouteModeLabel {
 
 function Test-SingBoxRunning {
     return ($script:ProcessRef -and -not $script:ProcessRef.HasExited)
+}
+
+function Test-LegacyRouteRestorePending {
+    return ($script:LegacyRouteRestorePending -or (Test-Path $script:LegacyRouteStatePath))
+}
+
+function Test-NetRouteExists([string]$destinationPrefix, [int]$interfaceIndex, [string]$nextHop) {
+    $existing = Get-NetRoute -DestinationPrefix $destinationPrefix -InterfaceIndex $interfaceIndex -ErrorAction SilentlyContinue |
+        Where-Object { $_.NextHop -eq $nextHop } |
+        Select-Object -First 1
+    return ($null -ne $existing)
+}
+
+function Read-LegacyRouteState {
+    if (-not (Test-Path $script:LegacyRouteStatePath)) { return $null }
+    $state = (Get-Content -Path $script:LegacyRouteStatePath -Raw -Encoding UTF8) | ConvertFrom-Json
+    return ConvertTo-ValidatedLegacyRouteState $state
+}
+
+function Restore-LegacyRouteState {
+    $state = Read-LegacyRouteState
+    if (-not $state) {
+        $script:LegacyRouteRestorePending = $false
+        return
+    }
+
+    foreach ($route in @($state.default_routes)) {
+        if (-not (Test-NetRouteExists ([string]$route.destination_prefix) ([int]$route.interface_index) ([string]$route.next_hop))) {
+            New-NetRoute -DestinationPrefix ([string]$route.destination_prefix) -InterfaceIndex ([int]$route.interface_index) -NextHop ([string]$route.next_hop) -RouteMetric ([int]$route.route_metric) -PolicyStore ActiveStore -ErrorAction Stop | Out-Null
+        }
+    }
+
+    foreach ($route in @($state.host_routes)) {
+        if ([bool]$route.created) {
+            Remove-NetRoute -DestinationPrefix ([string]$route.destination_prefix) -InterfaceIndex ([int]$route.interface_index) -NextHop ([string]$route.next_hop) -Confirm:$false -ErrorAction SilentlyContinue
+        }
+    }
+
+    Remove-Item -Path $script:LegacyRouteStatePath -Force -ErrorAction SilentlyContinue
+    $script:LegacyRouteRestorePending = $false
+    Append-Log "Legacy route state restored. Direct IPv4 default routes are available."
 }
 
 function Set-ConnectionState([string]$state) {
@@ -299,6 +383,12 @@ function Set-ConnectionState([string]$state) {
             $chkRouteAllTraffic.Enabled = $true
             $lblStatus.Text = "Status: Error ($routeMode)"
         }
+        "LegacyRouteRestore" {
+            $btnConnect.Enabled = $true
+            $btnDisconnect.Enabled = $true
+            $chkRouteAllTraffic.Enabled = $true
+            $lblStatus.Text = "Status: Disconnected ($routeMode, legacy route restore pending)"
+        }
         default {
             $btnConnect.Enabled = $true
             $btnDisconnect.Enabled = $false
@@ -308,6 +398,16 @@ function Set-ConnectionState([string]$state) {
     }
 }
 
+$btnPauseLog.Add_Click({
+    $script:LogsPaused = -not $script:LogsPaused
+    if ($script:LogsPaused) {
+        $btnPauseLog.Text = "Resume"
+    } else {
+        $btnPauseLog.Text = "Pause"
+        Flush-PausedLogLines
+    }
+})
+
 $btnCopyLog.Add_Click({
     if ($txtLogs.TextLength -gt 0) {
         [System.Windows.Forms.Clipboard]::SetText($txtLogs.Text)
@@ -316,6 +416,8 @@ $btnCopyLog.Add_Click({
 
 $btnClearLog.Add_Click({
     $txtLogs.Clear()
+    $script:PausedLogLines.Clear()
+    $script:PausedLogDropped = 0
 })
 
 $script:HealthTimer = New-Object System.Windows.Forms.Timer
@@ -327,8 +429,13 @@ $script:HealthTimer.Add_Tick({
             $exitCode = $script:ProcessRef.ExitCode
             $script:HealthTimer.Stop()
             $script:ProcessRef = $null
-            Set-ConnectionState "Disconnected"
-            Append-Log ("sing-box exited with code: " + $exitCode)
+            if (Test-LegacyRouteRestorePending) {
+                Set-ConnectionState "LegacyRouteRestore"
+                Append-Log ("sing-box exited with code: " + $exitCode + ". Legacy route state remains; click Disconnect to restore direct internet or Connect to retry.")
+            } else {
+                Set-ConnectionState "Disconnected"
+                Append-Log ("sing-box exited with code: " + $exitCode)
+            }
         }
     } catch {
         Append-FileLog ("Health timer error: " + $_.Exception.Message)
@@ -350,6 +457,11 @@ try {
 }
 Set-ConnectionState "Disconnected"
 Ensure-JobObject
+if (Test-LegacyRouteRestorePending) {
+    $script:LegacyRouteRestorePending = $true
+    Set-ConnectionState "LegacyRouteRestore"
+    Append-Log "Legacy route state exists from a previous build; click Disconnect to restore direct internet or Connect to retry."
+}
 
 $form.Add_Shown({
     try {
@@ -363,22 +475,16 @@ $form.Add_Shown({
 })
 
 function Start-VpnConnection {
+    $routeAllTraffic = $false
+    $hadRunningConnection = $false
+    $previousConnectionStopped = $false
+    $newProcessStarted = $false
     try {
         Set-ConnectionState "Connecting"
         $singboxPath = [string]$profile.singbox_path
         if (-not (Test-Path $singboxPath)) { throw "sing-box.exe not found: $singboxPath" }
         if (-not (Test-IsAdmin)) { throw "VPN mode (TUN) requires Administrator rights. Restart start.cmd as Administrator." }
-
-        if (Test-SingBoxRunning) {
-            if ($script:HealthTimer) { $script:HealthTimer.Stop() }
-            Stop-SingBox
-            Append-Log "Stopped previous connection."
-        }
-
-        $killedBeforeConnect = Stop-OrphanSingBox $singboxPath
-        if ($killedBeforeConnect -gt 0) {
-            Append-Log ("Stopped orphan sing-box processes: " + $killedBeforeConnect)
-        }
+        $hadRunningConnection = Test-SingBoxRunning
 
         $vlessUrl = $txtVless.Text.Trim()
         if ([string]::IsNullOrWhiteSpace($vlessUrl)) { throw "VLESS URL is empty" }
@@ -392,6 +498,23 @@ function Start-VpnConnection {
         $config = Build-SingBoxConfigFromVless $vlessUrl $vpnDomains $routeAllTraffic
         Write-TextNoBom -path $script:ConfigPath -content ($config | ConvertTo-Json -Depth 20)
         Assert-SingBoxConfigValid $singboxPath $script:ConfigPath | Out-Null
+
+        if (Test-LegacyRouteRestorePending) {
+            Restore-LegacyRouteState
+        }
+
+        if (Test-SingBoxRunning) {
+            if ($script:HealthTimer) { $script:HealthTimer.Stop() }
+            Stop-SingBox
+            $previousConnectionStopped = $true
+            Append-Log "Stopped previous connection."
+        }
+
+        $killedBeforeConnect = Stop-OrphanSingBox $singboxPath
+        if ($killedBeforeConnect -gt 0) {
+            Append-Log ("Stopped orphan sing-box processes: " + $killedBeforeConnect)
+        }
+
         if (Test-Path $script:SingBoxLogPath) {
             Remove-Item -Path $script:SingBoxLogPath -Force -ErrorAction SilentlyContinue
         }
@@ -418,6 +541,7 @@ function Start-VpnConnection {
         $proc = New-Object System.Diagnostics.Process
         $proc.StartInfo = $psi
         if (-not $proc.Start()) { throw "Failed to start sing-box process" }
+        $newProcessStarted = $true
         Add-ProcessToJob $proc
         $script:ProcessRef = $proc
 
@@ -430,9 +554,17 @@ function Start-VpnConnection {
         }
     } catch {
         if ($script:HealthTimer) { $script:HealthTimer.Stop() }
-        Stop-SingBox
-        Set-ConnectionState "Error"
+        if ($newProcessStarted -or $previousConnectionStopped -or -not $hadRunningConnection) {
+            Stop-SingBox
+        }
         Append-Log ("ERROR: " + $_.Exception.Message)
+        if (Test-SingBoxRunning) {
+            Set-ConnectionState "Connected"
+        } elseif (Test-LegacyRouteRestorePending) {
+            Set-ConnectionState "LegacyRouteRestore"
+        } else {
+            Set-ConnectionState "Error"
+        }
         [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Connection error", "OK", "Error") | Out-Null
     }
 }
@@ -458,7 +590,11 @@ $chkRouteAllTraffic.Add_CheckedChanged({
             Append-Log ("Routing mode changed to " + (Get-RouteModeLabel) + ". Reconnecting.")
             Start-VpnConnection
         } else {
-            Set-ConnectionState "Disconnected"
+            if (Test-LegacyRouteRestorePending) {
+                Set-ConnectionState "LegacyRouteRestore"
+            } else {
+                Set-ConnectionState "Disconnected"
+            }
             Append-Log ("Routing mode saved: " + (Get-RouteModeLabel))
         }
     } catch {
@@ -470,6 +606,8 @@ $chkRouteAllTraffic.Add_CheckedChanged({
         }
         if (Test-SingBoxRunning) {
             Set-ConnectionState "Connected"
+        } elseif (Test-LegacyRouteRestorePending) {
+            Set-ConnectionState "LegacyRouteRestore"
         } else {
             Set-ConnectionState "Disconnected"
         }
@@ -479,10 +617,21 @@ $chkRouteAllTraffic.Add_CheckedChanged({
 })
 
 $btnDisconnect.Add_Click({
-    if ($script:HealthTimer) { $script:HealthTimer.Stop() }
-    Stop-SingBox
-    Set-ConnectionState "Disconnected"
-    Append-Log "Disconnected."
+    try {
+        if ($script:HealthTimer) { $script:HealthTimer.Stop() }
+        Stop-SingBox
+        Restore-LegacyRouteState
+        Set-ConnectionState "Disconnected"
+        Append-Log "Disconnected."
+    } catch {
+        Append-Log ("ERROR: " + $_.Exception.Message)
+        if (Test-LegacyRouteRestorePending) {
+            Set-ConnectionState "LegacyRouteRestore"
+        } else {
+            Set-ConnectionState "Disconnected"
+        }
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Disconnect error", "OK", "Error") | Out-Null
+    }
 })
 
 $form.Add_FormClosing({

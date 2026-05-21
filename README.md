@@ -27,6 +27,8 @@ Minimal desktop client with:
 - `sing-box` path is fixed to `runtime/sing-box.exe` and is not editable in UI.
 - Split tunneling is done by `sing-box` route rules on the client (`tun` + domain rules).
 - `Route all traffic through VPN` routes public internet traffic through VLESS and keeps private/LAN IP ranges direct.
+- Full VPN mode enables sing-box `strict_route`; it does not remove Windows default routes.
+- If a previous build left `runtime/killswitch.routes.json`, the app restores those legacy route changes on `Disconnect` or before the next `Connect`.
 - Built-in proxy domain coverage includes: `youtube.com`, `youtu.be`, `googlevideo.com`, `ytimg.com`, `openai.com`, `chatgpt.com`, `oaistatic.com`.
 - Domain entries are canonicalized before routing: `*.example.com` is stored and routed as `example.com` because `domain_suffix` already matches subdomains.
 - In selective mode, traffic for domains outside the configured domain rules goes `direct`.

@@ -211,6 +211,124 @@ function Get-OptionalHost([hashtable]$params) {
     return Normalize-DomainEntry $transportHost
 }
 
+function Get-LegacyRoutePropertyValue([object]$object, [string]$name, [bool]$required = $true) {
+    if ($object -is [hashtable]) {
+        if ($object.ContainsKey($name)) { return $object[$name] }
+    } elseif ($object -and ($object.PSObject.Properties.Name -contains $name)) {
+        return $object.$name
+    }
+
+    if ($required) { throw "Legacy route state is missing '$name'." }
+    return $null
+}
+
+function Get-LegacyRouteString([object]$route, [string]$name) {
+    $value = Get-LegacyRoutePropertyValue $route $name
+    if ([string]::IsNullOrWhiteSpace([string]$value)) {
+        throw "Legacy route state has an empty '$name'."
+    }
+    return ([string]$value).Trim()
+}
+
+function Get-LegacyRouteInt([object]$route, [string]$name, [int]$minValue, [int]$maxValue) {
+    $value = Get-LegacyRoutePropertyValue $route $name
+    $parsed = 0
+    if (-not [int]::TryParse(([string]$value).Trim(), [ref]$parsed) -or $parsed -lt $minValue -or $parsed -gt $maxValue) {
+        throw "Legacy route state has an invalid '$name'."
+    }
+    return $parsed
+}
+
+function Get-LegacyRouteBool([object]$route, [string]$name, [bool]$defaultValue) {
+    $value = Get-LegacyRoutePropertyValue $route $name $false
+    if ($null -eq $value) { return $defaultValue }
+    if ($value -is [bool]) { return [bool]$value }
+
+    $parsed = $false
+    if ([bool]::TryParse(([string]$value).Trim(), [ref]$parsed)) { return $parsed }
+    throw "Legacy route state has an invalid '$name'."
+}
+
+function Test-IPv4Address([string]$value) {
+    if ([string]::IsNullOrWhiteSpace($value)) { return $false }
+    $address = $null
+    if (-not [System.Net.IPAddress]::TryParse($value.Trim(), [ref]$address)) { return $false }
+    return ($address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork)
+}
+
+function Test-IPv4Cidr([string]$value, [int]$requiredPrefixLength = -1) {
+    if ([string]::IsNullOrWhiteSpace($value)) { return $false }
+    $parts = $value.Trim().Split("/")
+    if ($parts.Count -ne 2) { return $false }
+    if (-not (Test-IPv4Address $parts[0])) { return $false }
+
+    $prefixLength = 0
+    if (-not [int]::TryParse($parts[1], [ref]$prefixLength)) { return $false }
+    if ($prefixLength -lt 0 -or $prefixLength -gt 32) { return $false }
+    if ($requiredPrefixLength -ge 0 -and $prefixLength -ne $requiredPrefixLength) { return $false }
+    return $true
+}
+
+function ConvertTo-ValidatedLegacyRouteState([object]$state) {
+    if (-not $state) { throw "Legacy route state is empty." }
+
+    $defaultRoutesValue = Get-LegacyRoutePropertyValue $state "default_routes" $false
+    $hostRoutesValue = Get-LegacyRoutePropertyValue $state "host_routes" $false
+    $defaultRoutes = if ($null -eq $defaultRoutesValue) { @() } else { @($defaultRoutesValue) }
+    $hostRoutes = if ($null -eq $hostRoutesValue) { @() } else { @($hostRoutesValue) }
+    if ($defaultRoutes.Count -eq 0 -and $hostRoutes.Count -eq 0) {
+        throw "Legacy route state does not contain route entries."
+    }
+
+    $validatedDefaultRoutes = @()
+    foreach ($route in $defaultRoutes) {
+        $destinationPrefix = Get-LegacyRouteString $route "destination_prefix"
+        if ($destinationPrefix -ne "0.0.0.0/0") {
+            throw "Legacy default route destination_prefix must be 0.0.0.0/0."
+        }
+
+        $interfaceIndex = Get-LegacyRouteInt $route "interface_index" 1 ([int]::MaxValue)
+        $nextHop = Get-LegacyRouteString $route "next_hop"
+        if (-not (Test-IPv4Address $nextHop)) {
+            throw "Legacy default route next_hop must be an IPv4 address."
+        }
+
+        $routeMetric = Get-LegacyRouteInt $route "route_metric" 0 65535
+        $validatedDefaultRoutes += @{
+            destination_prefix = $destinationPrefix
+            interface_index = $interfaceIndex
+            next_hop = $nextHop
+            route_metric = $routeMetric
+        }
+    }
+
+    $validatedHostRoutes = @()
+    foreach ($route in $hostRoutes) {
+        $destinationPrefix = Get-LegacyRouteString $route "destination_prefix"
+        if (-not (Test-IPv4Cidr $destinationPrefix 32)) {
+            throw "Legacy host route destination_prefix must be an IPv4 /32 prefix."
+        }
+
+        $interfaceIndex = Get-LegacyRouteInt $route "interface_index" 1 ([int]::MaxValue)
+        $nextHop = Get-LegacyRouteString $route "next_hop"
+        if (-not (Test-IPv4Address $nextHop)) {
+            throw "Legacy host route next_hop must be an IPv4 address."
+        }
+
+        $validatedHostRoutes += @{
+            destination_prefix = $destinationPrefix
+            interface_index = $interfaceIndex
+            next_hop = $nextHop
+            created = (Get-LegacyRouteBool $route "created" $false)
+        }
+    }
+
+    return @{
+        default_routes = @($validatedDefaultRoutes)
+        host_routes = @($validatedHostRoutes)
+    }
+}
+
 function Build-SingBoxConfigFromVless([string]$vlessUrl, [string[]]$vpnDomains, [bool]$routeAllTraffic = $false) {
     if ([string]::IsNullOrWhiteSpace($vlessUrl)) { throw "VLESS URL is empty." }
     $trimmed = $vlessUrl.Trim()
@@ -341,7 +459,7 @@ function Build-SingBoxConfigFromVless([string]$vlessUrl, [string[]]$vpnDomains, 
             reverse_mapping = $true
         }
         inbounds = @(
-            @{ type = "tun"; tag = "tun-in"; interface_name = "sb-vpn"; address = @("172.19.0.1/30"); mtu = 1500; auto_route = $true; strict_route = $false; stack = "mixed" }
+            @{ type = "tun"; tag = "tun-in"; interface_name = "sb-vpn"; address = @("172.19.0.1/30"); mtu = 1500; auto_route = $true; strict_route = $routeAllTraffic; stack = "mixed" }
         )
         outbounds = @(
             $outbound,
