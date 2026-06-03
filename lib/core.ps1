@@ -98,6 +98,25 @@ function Get-NormalizedDomainArray([string[]]$domains) {
     foreach ($d in $domains) {
         $domain = Normalize-DomainEntry ([string]$d)
         if ([string]::IsNullOrWhiteSpace($domain)) { continue }
+        if ($set.Contains($domain)) { continue }
+
+        $covered = $false
+        foreach ($existing in $result) {
+            if (Test-DomainSuffixCovers $existing $domain) {
+                $covered = $true
+                break
+            }
+        }
+        if ($covered) { continue }
+
+        for ($i = $result.Count - 1; $i -ge 0; $i--) {
+            $existing = [string]$result[$i]
+            if (Test-DomainSuffixCovers $domain $existing) {
+                [void]$set.Remove($existing)
+                $result.RemoveAt($i)
+            }
+        }
+
         if ($set.Add($domain)) { $result.Add($domain) }
     }
     return $result.ToArray()
@@ -108,13 +127,19 @@ function Get-NormalizedDomainList([string]$rawText) {
     return Get-NormalizedDomainArray ($rawText -split "\r?\n|\r")
 }
 
+function Test-DomainSuffixCovers([string]$suffix, [string]$domain) {
+    if ([string]::IsNullOrWhiteSpace($suffix) -or [string]::IsNullOrWhiteSpace($domain)) { return $false }
+    if ([System.StringComparer]::OrdinalIgnoreCase.Equals($suffix, $domain)) { return $true }
+    return $domain.EndsWith("." + $suffix, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
 function Merge-RequiredVpnDomains([string[]]$domains) {
     $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     $result = New-Object System.Collections.Generic.List[string]
     foreach ($d in (Get-NormalizedDomainArray $domains)) {
         if ($set.Add($d)) { $result.Add($d) }
     }
-    foreach ($required in (Get-DefaultVpnDomains)) {
+    foreach ($required in (Get-RequiredVpnDomains)) {
         if ($set.Add($required)) { $result.Add($required) }
     }
     return $result.ToArray()
@@ -626,7 +651,7 @@ function Get-DefaultClientProfile {
     return @{
         singbox_path = $defaultSingboxPath
         vless_url = ""
-        primary_domains_text = (Get-DefaultVpnDomains) -join [Environment]::NewLine
+        primary_domains_text = (Get-RequiredVpnDomains) -join [Environment]::NewLine
         route_all_traffic = $false
     }
 }
@@ -673,13 +698,29 @@ function Try-MigrateLegacyProfile {
     } catch {}
 }
 
-function Read-DomainSettingsText([string]$path) {
-    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path $path)) { return $null }
+function Read-DomainSettingsArray([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path $path)) { return @() }
     $settings = (Get-Content -Path $path -Raw -Encoding UTF8) | ConvertFrom-Json
-    if (-not $settings.vpn_domains) { return $null }
-    $domains = Get-NormalizedDomainArray @($settings.vpn_domains)
+    if (-not $settings.vpn_domains) { return @() }
+    return Get-NormalizedDomainArray @($settings.vpn_domains)
+}
+
+function Read-DomainSettingsText([string]$path) {
+    $domains = @(Read-DomainSettingsArray $path)
     if (-not $domains -or $domains.Count -eq 0) { return $null }
     return ($domains -join [Environment]::NewLine)
+}
+
+function Get-RequiredVpnDomains {
+    if ($script:SeedSettingsPath -and (Test-Path $script:SeedSettingsPath)) {
+        try {
+            $seedDomains = @(Read-DomainSettingsArray $script:SeedSettingsPath)
+            if ($seedDomains.Count -gt 0) { return $seedDomains }
+        } catch {
+            Append-FileLog ("Seed required domains ignored: " + $_.Exception.Message)
+        }
+    }
+    return Get-DefaultVpnDomains
 }
 
 function Get-BooleanProperty([object]$settings, [string]$name, [bool]$defaultValue) {
@@ -717,8 +758,10 @@ function Load-Profile {
     $routeAllTraffic = [bool]$default.route_all_traffic
     if (Test-Path $script:SettingsPath) {
         try {
-            $runtimeText = Read-DomainSettingsText $script:SettingsPath
-            if (-not [string]::IsNullOrWhiteSpace($runtimeText)) { $primaryText = $runtimeText }
+            $runtimeDomains = @(Read-DomainSettingsArray $script:SettingsPath)
+            if ($runtimeDomains.Count -gt 0) {
+                $primaryText = (Merge-RequiredVpnDomains $runtimeDomains) -join [Environment]::NewLine
+            }
             $routeAllTraffic = Read-RouteAllTrafficSetting $script:SettingsPath $false
         } catch {
             Append-FileLog ("Runtime settings ignored: " + $_.Exception.Message)

@@ -31,6 +31,12 @@ Describe "Domain normalization" {
         ($domains -join ",") | Should Be "example.com,foo.com"
     }
 
+    It "removes domains already covered by broader domain suffixes" {
+        $domains = Get-NormalizedDomainList "api.openai.com`nOpenAI.com`nfoo.example.com`nbar.foo.example.com`n*.example.com`nexample.net`nnotexample.com"
+
+        ($domains -join ",") | Should Be "openai.com,example.com,example.net,notexample.com"
+    }
+
     It "rejects domains with ports or spaces" {
         { Get-NormalizedDomainList "example.com:443" } | Should Throw "ports are not allowed"
         { Get-NormalizedDomainList "bad domain.com" } | Should Throw "spaces are not allowed"
@@ -355,14 +361,26 @@ Describe "Profile and settings ownership" {
         Test-Path $script:SettingsPath | Should Be $false
     }
 
-    It "uses runtime settings before the root seed" {
-        Write-JsonNoBom -path $script:SeedSettingsPath -value @{ vpn_domains = @("seed.example"); route_all_traffic = $true } -depth 4
+    It "uses runtime settings and appends updated root seed domains" {
+        Write-JsonNoBom -path $script:SeedSettingsPath -value @{ vpn_domains = @("seed.example", "new-seed.example"); route_all_traffic = $true } -depth 4
         Write-JsonNoBom -path $script:SettingsPath -value @{ vpn_domains = @("runtime.example"); route_all_traffic = $false } -depth 4
 
         $profile = Load-Profile
 
-        ($profile.primary_domains_text -split "\r?\n|\r" -join ",") | Should Be "runtime.example"
+        ($profile.primary_domains_text -split "\r?\n|\r" -join ",") | Should Be "runtime.example,seed.example,new-seed.example"
         $profile.route_all_traffic | Should Be $false
+    }
+
+    It "saves updated root seed domains into runtime settings without mutating the seed" {
+        Write-JsonNoBom -path $script:SeedSettingsPath -value @{ vpn_domains = @("seed.example", "new-seed.example") } -depth 4
+        $seedBefore = Get-Content -Path $script:SeedSettingsPath -Raw -Encoding UTF8
+
+        Save-SettingsProfile "runtime.example`n*.Seed.example" $true
+
+        (Get-Content -Path $script:SeedSettingsPath -Raw -Encoding UTF8) | Should Be $seedBefore
+        $runtime = (Get-Content -Path $script:SettingsPath -Raw -Encoding UTF8) | ConvertFrom-Json
+        (@($runtime.vpn_domains) -join ",") | Should Be "runtime.example,seed.example,new-seed.example"
+        $runtime.route_all_traffic | Should Be $true
     }
 
     It "saves mutable settings only to runtime settings" {
