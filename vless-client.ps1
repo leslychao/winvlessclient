@@ -34,6 +34,9 @@ function Release-AppResources {
         if ($script:HealthTimer) { $script:HealthTimer.Stop() }
     } catch {}
     try {
+        Stop-FullModeExitIpDiagnosticTimer
+    } catch {}
+    try {
         Stop-SingBox
     } catch {}
     try {
@@ -325,6 +328,42 @@ function Test-LegacyRouteRestorePending {
     return ($script:LegacyRouteRestorePending -or (Test-Path $script:LegacyRouteStatePath))
 }
 
+function Write-FullModeExitIpDiagnosticLog {
+    try {
+        if (-not (Test-SingBoxRunning)) {
+            Append-Log "External IP diagnostic skipped: connection is not running."
+            return
+        }
+        $diagnostic = Invoke-ExternalIpDiagnostic
+        foreach ($line in (Format-ExitIpDiagnosticLogLines $diagnostic)) {
+            Append-Log $line
+        }
+    } catch {
+        Append-Log ("External IP diagnostic failed: " + $_.Exception.Message)
+    }
+}
+
+function Stop-FullModeExitIpDiagnosticTimer {
+    if (-not $script:ExitIpDiagnosticTimer) { return }
+    try {
+        $script:ExitIpDiagnosticTimer.Stop()
+        $script:ExitIpDiagnosticTimer.Dispose()
+    } catch {}
+    $script:ExitIpDiagnosticTimer = $null
+}
+
+function Start-FullModeExitIpDiagnosticTimer {
+    Stop-FullModeExitIpDiagnosticTimer
+    $timer = New-Object System.Windows.Forms.Timer
+    $timer.Interval = 2000
+    $timer.Add_Tick({
+        Stop-FullModeExitIpDiagnosticTimer
+        Write-FullModeExitIpDiagnosticLog
+    })
+    $script:ExitIpDiagnosticTimer = $timer
+    $script:ExitIpDiagnosticTimer.Start()
+}
+
 function Test-NetRouteExists([string]$destinationPrefix, [int]$interfaceIndex, [string]$nextHop) {
     $existing = Get-NetRoute -DestinationPrefix $destinationPrefix -InterfaceIndex $interfaceIndex -ErrorAction SilentlyContinue |
         Where-Object { $_.NextHop -eq $nextHop } |
@@ -481,6 +520,7 @@ function Start-VpnConnection {
     $newProcessStarted = $false
     try {
         Set-ConnectionState "Connecting"
+        Stop-FullModeExitIpDiagnosticTimer
         $singboxPath = [string]$profile.singbox_path
         if (-not (Test-Path $singboxPath)) { throw "sing-box.exe not found: $singboxPath" }
         if (-not (Test-IsAdmin)) { throw "VPN mode (TUN) requires Administrator rights. Restart start.cmd as Administrator." }
@@ -549,11 +589,13 @@ function Start-VpnConnection {
         Set-ConnectionState "Connected"
         if ($routeAllTraffic) {
             Append-Log ("Connected. PID=" + $proc.Id + ", TUN=sb-vpn, mode=full")
+            Start-FullModeExitIpDiagnosticTimer
         } else {
             Append-Log ("Connected. PID=" + $proc.Id + ", TUN=sb-vpn, mode=selective, domains=" + $vpnDomains.Count)
         }
     } catch {
         if ($script:HealthTimer) { $script:HealthTimer.Stop() }
+        Stop-FullModeExitIpDiagnosticTimer
         if ($newProcessStarted -or $previousConnectionStopped -or -not $hadRunningConnection) {
             Stop-SingBox
         }
@@ -619,6 +661,7 @@ $chkRouteAllTraffic.Add_CheckedChanged({
 $btnDisconnect.Add_Click({
     try {
         if ($script:HealthTimer) { $script:HealthTimer.Stop() }
+        Stop-FullModeExitIpDiagnosticTimer
         Stop-SingBox
         Restore-LegacyRouteState
         Set-ConnectionState "Disconnected"

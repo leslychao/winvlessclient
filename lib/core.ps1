@@ -120,6 +120,124 @@ function Merge-RequiredVpnDomains([string[]]$domains) {
     return $result.ToArray()
 }
 
+function Get-ObjectPropertyValue([object]$value, [string[]]$propertyNames) {
+    if ($null -eq $value) { return $null }
+    foreach ($propertyName in $propertyNames) {
+        if ([string]::IsNullOrWhiteSpace($propertyName)) { continue }
+        if ($value -is [hashtable] -and $value.ContainsKey($propertyName)) {
+            return $value[$propertyName]
+        }
+        $property = $value.PSObject.Properties[$propertyName]
+        if ($property) { return $property.Value }
+    }
+    return $null
+}
+
+function Normalize-CountryCode([object]$countryCode) {
+    if ($null -eq $countryCode) { return "" }
+    $normalized = ([string]$countryCode).Trim().ToUpperInvariant()
+    if ([string]::IsNullOrWhiteSpace($normalized)) { return "" }
+    if ($normalized -eq "UK") { return "GB" }
+    if ($normalized -notmatch "^[A-Z]{2}$") {
+        throw "External IP diagnostic response does not include a two-letter country code."
+    }
+    return $normalized
+}
+
+function Get-OpenAiSupportedCountryCodeSet {
+    if ($script:OpenAiSupportedCountryCodeSet) { return $script:OpenAiSupportedCountryCodeSet }
+
+    # Source: https://help.openai.com/en/articles/8983035, checked 2026-06-02.
+    $codes = @(
+        "AF", "AL", "DZ", "AD", "AO", "AG", "AR", "AM", "AU", "AT", "AZ", "BS", "BH", "BD", "BB", "BE",
+        "BZ", "BJ", "BT", "BO", "BA", "BW", "BR", "BN", "BG", "BF", "BI", "CV", "KH", "CM", "CA", "CF",
+        "TD", "CL", "CO", "KM", "CG", "CD", "CR", "CI", "HR", "CY", "CZ", "DK", "DJ", "DM", "DO", "EC",
+        "EG", "SV", "GQ", "ER", "EE", "SZ", "ET", "FJ", "FI", "FR", "GA", "GM", "GE", "DE", "GH", "GR",
+        "GD", "GT", "GN", "GW", "GY", "HT", "VA", "HN", "HU", "IS", "IN", "ID", "IQ", "IE", "IL", "IT",
+        "JM", "JP", "JO", "KZ", "KE", "KI", "KW", "KG", "LA", "LV", "LB", "LS", "LR", "LY", "LI", "LT",
+        "LU", "MG", "MW", "MY", "MV", "ML", "MT", "MH", "MR", "MU", "MX", "FM", "MD", "MC", "MN", "ME",
+        "MA", "MZ", "MM", "NA", "NR", "NP", "NL", "NZ", "NI", "NE", "NG", "MK", "NO", "OM", "PK", "PW",
+        "PS", "PA", "PG", "PY", "PE", "PH", "PL", "PT", "QA", "RO", "RW", "KN", "LC", "VC", "WS", "SM",
+        "ST", "SA", "SN", "RS", "SC", "SL", "SG", "SK", "SI", "SB", "SO", "ZA", "KR", "SS", "ES", "LK",
+        "SR", "SE", "CH", "SD", "TW", "TJ", "TZ", "TH", "TL", "TG", "TO", "TT", "TN", "TR", "TM", "TV",
+        "UG", "UA", "AE", "GB", "US", "UY", "UZ", "VU", "VN", "YE", "ZM", "ZW"
+    )
+
+    $set = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($code in $codes) {
+        [void]$set.Add($code)
+    }
+    $script:OpenAiSupportedCountryCodeSet = $set
+    return $script:OpenAiSupportedCountryCodeSet
+}
+
+function Test-OpenAiSupportedCountry([string]$countryCode) {
+    $normalized = Normalize-CountryCode $countryCode
+    if ([string]::IsNullOrWhiteSpace($normalized)) { return $false }
+    return (Get-OpenAiSupportedCountryCodeSet).Contains($normalized)
+}
+
+function ConvertTo-ExitIpDiagnosticResult([object]$response) {
+    $ip = ([string](Get-ObjectPropertyValue $response @("ip", "query", "address"))).Trim()
+    if ([string]::IsNullOrWhiteSpace($ip)) {
+        throw "External IP diagnostic response does not include an IP address."
+    }
+
+    $parsedIp = $null
+    if (-not [System.Net.IPAddress]::TryParse($ip, [ref]$parsedIp)) {
+        throw "External IP diagnostic response contains an invalid IP address: $ip"
+    }
+
+    $country = Normalize-CountryCode (Get-ObjectPropertyValue $response @("country_code", "country_iso", "country"))
+    if ([string]::IsNullOrWhiteSpace($country)) {
+        throw "External IP diagnostic response does not include a country code."
+    }
+
+    return @{
+        ip = $ip
+        country = $country
+        openai_supported = (Test-OpenAiSupportedCountry $country)
+    }
+}
+
+function Format-ExitIpDiagnosticLogLines([object]$diagnostic) {
+    $ip = ([string](Get-ObjectPropertyValue $diagnostic @("ip"))).Trim()
+    $country = Normalize-CountryCode (Get-ObjectPropertyValue $diagnostic @("country"))
+    $openAiSupportedValue = Get-ObjectPropertyValue $diagnostic @("openai_supported")
+    $openAiSupported = if ($null -eq $openAiSupportedValue) { Test-OpenAiSupportedCountry $country } else { [bool]$openAiSupportedValue }
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add(("External IP: {0}, country: {1}" -f $ip, $country))
+    if (-not $openAiSupported) {
+        $lines.Add("VLESS exit IP is not suitable for OpenAI")
+    }
+    return $lines.ToArray()
+}
+
+function Invoke-ExternalIpDiagnostic([int]$timeoutSec = 8) {
+    $endpoints = @(
+        @{ name = "ipinfo.io"; uri = "https://ipinfo.io/json" },
+        @{ name = "ifconfig.co"; uri = "https://ifconfig.co/json" }
+    )
+    $errors = New-Object System.Collections.Generic.List[string]
+
+    foreach ($endpoint in $endpoints) {
+        try {
+            $response = Invoke-RestMethod `
+                -Uri ([string]$endpoint["uri"]) `
+                -Method Get `
+                -TimeoutSec $timeoutSec `
+                -UseBasicParsing `
+                -Headers @{ Accept = "application/json"; "User-Agent" = "winvlessclient" }
+            return ConvertTo-ExitIpDiagnosticResult $response
+        } catch {
+            $errors.Add(("{0}: {1}" -f $endpoint["name"], $_.Exception.Message))
+        }
+    }
+
+    throw ("no external IP endpoint returned usable data: " + ($errors -join "; "))
+}
+
 function Read-SingBoxLogDelta {
     try {
         if (-not (Test-Path $script:SingBoxLogPath)) {

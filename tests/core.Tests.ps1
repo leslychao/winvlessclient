@@ -109,6 +109,78 @@ Describe "VLESS config builder" {
     }
 }
 
+Describe "Full mode exit IP diagnostics" {
+    BeforeEach {
+        Reset-TestPaths
+    }
+
+    It "normalizes ipinfo.io JSON responses" {
+        $diagnostic = ConvertTo-ExitIpDiagnosticResult ([pscustomobject]@{
+                ip = "203.0.113.10"
+                country = "US"
+            })
+
+        $diagnostic.ip | Should Be "203.0.113.10"
+        $diagnostic.country | Should Be "US"
+        $diagnostic.openai_supported | Should Be $true
+    }
+
+    It "normalizes ifconfig.co JSON responses" {
+        $diagnostic = ConvertTo-ExitIpDiagnosticResult ([pscustomobject]@{
+                ip = "203.0.113.20"
+                country = "Germany"
+                country_iso = "DE"
+            })
+
+        $diagnostic.ip | Should Be "203.0.113.20"
+        $diagnostic.country | Should Be "DE"
+        $diagnostic.openai_supported | Should Be $true
+    }
+
+    It "falls back to ifconfig.co when ipinfo.io fails" {
+        Mock Invoke-RestMethod {
+            throw "ipinfo unavailable"
+        } -ParameterFilter { $Uri -eq "https://ipinfo.io/json" }
+        Mock Invoke-RestMethod {
+            [pscustomobject]@{
+                ip = "203.0.113.30"
+                country = "France"
+                country_iso = "FR"
+            }
+        } -ParameterFilter { $Uri -eq "https://ifconfig.co/json" }
+
+        $diagnostic = Invoke-ExternalIpDiagnostic
+
+        $diagnostic.ip | Should Be "203.0.113.30"
+        $diagnostic.country | Should Be "FR"
+        $diagnostic.openai_supported | Should Be $true
+        Assert-MockCalled Invoke-RestMethod -Times 1 -ParameterFilter { $Uri -eq "https://ipinfo.io/json" }
+        Assert-MockCalled Invoke-RestMethod -Times 1 -ParameterFilter { $Uri -eq "https://ifconfig.co/json" }
+    }
+
+    It "does not warn for supported OpenAI countries" {
+        $lines = Format-ExitIpDiagnosticLogLines @{
+            ip = "203.0.113.40"
+            country = "US"
+            openai_supported = $true
+        }
+
+        ($lines -join "`n") | Should Match "External IP: 203.0.113.40, country: US"
+        ($lines -join "`n") | Should Not Match "VLESS exit IP is not suitable for OpenAI"
+    }
+
+    It "warns for unsupported OpenAI countries" {
+        $lines = Format-ExitIpDiagnosticLogLines @{
+            ip = "203.0.113.50"
+            country = "RU"
+            openai_supported = $false
+        }
+
+        ($lines -join "`n") | Should Match "External IP: 203.0.113.50, country: RU"
+        ($lines -join "`n") | Should Match "VLESS exit IP is not suitable for OpenAI"
+    }
+}
+
 Describe "Legacy route state validation" {
     It "accepts the expected previous route state shape" {
         $state = @"
@@ -227,6 +299,31 @@ Describe "VPN connection path regressions" {
         }, $true)
         $buildCommand | Should Not Be $null
         @($buildCommand.CommandElements).Count | Should Be 4
+    }
+
+    It "schedules exit IP diagnostics only after full mode connect" {
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $repoRoot "vless-client.ps1"), [ref]$tokens, [ref]$errors)
+        $errors.Count | Should Be 0
+
+        $startFunction = $ast.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq "Start-VpnConnection"
+        }, $true)
+        $startFunction | Should Not Be $null
+
+        $startText = $startFunction.Extent.Text
+        $startText | Should Match '(?s)Set-ConnectionState\s+"Connected".*if\s*\(\$routeAllTraffic\)\s*\{.*Start-FullModeExitIpDiagnosticTimer'
+        $startText | Should Not Match '(?s)else\s*\{.*Start-FullModeExitIpDiagnosticTimer'
+        $startText | Should Not Match '(?s)Set-ConnectionState\s+"Connected".*Invoke-ExternalIpDiagnostic'
+    }
+
+    It "stops pending exit IP diagnostics during disconnect" {
+        $scriptText = Get-Content -Path (Join-Path $repoRoot "vless-client.ps1") -Raw -Encoding UTF8
+
+        $scriptText | Should Match '(?s)\$btnDisconnect\.Add_Click\(\{.*Stop-FullModeExitIpDiagnosticTimer.*Stop-SingBox'
     }
 }
 

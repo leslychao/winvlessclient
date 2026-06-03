@@ -15,6 +15,7 @@ if (-not (Test-Path $script:RuntimeDir)) {
 
 $script:ProcessRef = $null
 $script:HealthTimer = $null
+$script:ExitIpDiagnosticTimer = $null
 $script:JobHandle = [IntPtr]::Zero
 $script:InstanceMutex = $null
 $script:LastSingBoxLogOffset = 0
